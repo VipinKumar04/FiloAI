@@ -1,0 +1,18 @@
+{
+  "name": "filoai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Privacy-first AI-powered digital decluttering agent.",
+  "main": "backend/server.js",
+  "scripts": {
+    "start": "node backend/server.js",
+    "dev": "node --watch backend/server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^5.1.0"
+  }
+}
