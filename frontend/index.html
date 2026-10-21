@@ -47,35 +47,97 @@
         <div class="stats-grid">
           <article class="stat-panel">
             <p class="stat-label">FILES SCANNED</p>
-            <p class="stat-value">—</p>
-            <p class="stat-note">Waiting for folder access</p>
+            <p id="stat-files" class="stat-value">—</p>
+            <p id="stat-files-note" class="stat-note">Waiting for scan</p>
           </article>
           <article class="stat-panel">
-            <p class="stat-label">DUPLICATES FOUND</p>
-            <p class="stat-value">—</p>
-            <p class="stat-note">Nothing analyzed yet</p>
+            <p class="stat-label">DIRECTORIES</p>
+            <p id="stat-dirs" class="stat-value">—</p>
+            <p id="stat-dirs-note" class="stat-note">Waiting for scan</p>
           </article>
           <article class="stat-panel">
-            <p class="stat-label">PENDING SUGGESTIONS</p>
-            <p class="stat-value">—</p>
-            <p class="stat-note">You stay in control</p>
+            <p class="stat-label">TOTAL SIZE</p>
+            <p id="stat-size" class="stat-value">—</p>
+            <p id="stat-size-note" class="stat-note">Waiting for scan</p>
           </article>
         </div>
 
         <div class="content-grid">
-          <article class="panel folder-panel">
+          <article class="panel folder-panel" id="folder-panel">
             <div class="panel-heading">
               <div>
                 <p class="eyebrow">01 — SOURCE</p>
-                <h3>Choose a space</h3>
+                <h3>Approved scan directory</h3>
               </div>
-              <span class="panel-icon" aria-hidden="true">↗</span>
+              <span class="badge-readonly" title="Read-only filesystem access enforced">READ-ONLY</span>
             </div>
-            <div class="empty-state">
+
+            <div class="scan-controls">
+              <div class="root-info">
+                <span class="root-label">APPROVED ROOT:</span>
+                <code id="approved-root-display" class="root-code" title="Configured via FILO_SCAN_ROOT">Loading…</code>
+              </div>
+              <form id="scan-form" class="scan-form">
+                <div class="input-group">
+                  <label for="scan-path-input" class="visually-hidden">Relative path</label>
+                  <input
+                    id="scan-path-input"
+                    type="text"
+                    class="input-path"
+                    placeholder="Subfolder or . for root"
+                    value="."
+                    autocomplete="off"
+                    spellcheck="false"
+                  >
+                  <button id="scan-button" class="button button-primary button-scan" type="submit">
+                    <span id="scan-button-text">Scan directory</span>
+                    <span id="scan-spinner" class="scan-spinner hidden" aria-hidden="true"></span>
+                  </button>
+                </div>
+              </form>
+              <p class="scan-hint">
+                Scanning is strictly confined to the approved root. Set <code>FILO_SCAN_ROOT</code> in your environment to target another directory.
+              </p>
+            </div>
+
+            <div id="scan-alert" class="scan-alert hidden" role="alert"></div>
+
+            <div id="scan-loading" class="scan-state-loading hidden">
+              <div class="state-spinner" aria-hidden="true"></div>
+              <p class="empty-title">Scanning directory…</p>
+              <p class="muted">Reading file metadata safely in read-only mode.</p>
+            </div>
+
+            <div id="scan-empty-state" class="empty-state">
               <div class="line-icon" aria-hidden="true">⌁</div>
-              <p class="empty-title">Your files, your boundaries.</p>
-              <p class="muted">Folder scanning will be available in a future phase. filoAI will only inspect a location you explicitly choose.</p>
-              <span class="coming-soon">FOLDER ACCESS · COMING SOON</span>
+              <p class="empty-title">No files scanned yet.</p>
+              <p class="muted">Click "Scan directory" to inspect files in the approved root in read-only mode.</p>
+              <span class="coming-soon">READ-ONLY SCAN READY</span>
+            </div>
+
+            <div id="scan-results" class="scan-results hidden">
+              <div class="results-header">
+                <span id="results-count" class="results-count">0 items found</span>
+                <span id="results-duration" class="results-duration"></span>
+              </div>
+              <div id="results-truncated-banner" class="truncated-banner hidden">
+                <span>⚠ File limit reached. Additional results were truncated.</span>
+              </div>
+              <div class="table-container">
+                <table class="file-table" aria-label="Scanned files">
+                  <thead>
+                    <tr>
+                      <th scope="col" class="th-name">Name & Relative Path</th>
+                      <th scope="col" class="th-ext">Ext</th>
+                      <th scope="col" class="th-size">Size</th>
+                      <th scope="col" class="th-date">Modified</th>
+                    </tr>
+                  </thead>
+                  <tbody id="file-table-body">
+                    <!-- Populated dynamically -->
+                  </tbody>
+                </table>
+              </div>
             </div>
           </article>
 
