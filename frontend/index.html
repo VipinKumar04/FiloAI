@@ -388,6 +388,15 @@
               <span class="results-count">Operation history</span>
               <button id="btn-refresh-history" class="button-link" type="button">Refresh history</button>
             </div>
+            <div id="org-recovery-banner" class="org-recovery-banner hidden" role="alert">
+              <div class="recovery-banner-header">
+                <span class="recovery-icon" aria-hidden="true">⚠</span>
+                <div>
+                  <strong id="org-recovery-title">Operation Recovery Required</strong>
+                  <p id="org-recovery-desc">One or more operations require manual review. No files were modified automatically on startup.</p>
+                </div>
+              </div>
+            </div>
             <div id="org-history-empty" class="history-empty-note">No file organization actions have been performed yet.</div>
             <div id="org-history-table-container" class="table-container hidden">
               <table class="file-table" aria-label="Operation history">

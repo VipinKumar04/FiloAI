@@ -793,7 +793,7 @@ function handleCancelPreview() {
 }
 
 /**
- * Fetches and displays completed operations history.
+ * Fetches and displays completed operations history and recovery state.
  */
 async function loadOperationHistory() {
   try {
@@ -806,6 +806,24 @@ async function loadOperationHistory() {
     if (!body.success) return;
 
     const history = body.data.history || [];
+    const recoveryRequiredCount = body.data.recoveryRequiredCount || 0;
+    const orgRecoveryBanner = document.getElementById("org-recovery-banner");
+
+    if (orgRecoveryBanner) {
+      if (recoveryRequiredCount > 0) {
+        orgRecoveryBanner.classList.remove("hidden");
+        const titleEl = document.getElementById("org-recovery-title");
+        const descEl = document.getElementById("org-recovery-desc");
+        if (titleEl) {
+          titleEl.textContent = `${recoveryRequiredCount} Operation${recoveryRequiredCount === 1 ? "" : "s"} Require Recovery Review`;
+        }
+        if (descEl) {
+          descEl.textContent = "Interrupted or inconsistent file operation detected. FiloAI never modifies, deletes, or restores files automatically. Review below to dismiss or resolve.";
+        }
+      } else {
+        orgRecoveryBanner.classList.add("hidden");
+      }
+    }
 
     if (history.length === 0) {
       orgHistoryEmpty.classList.remove("hidden");
@@ -817,13 +835,33 @@ async function loadOperationHistory() {
     orgHistoryTableContainer.classList.remove("hidden");
 
     orgHistoryBody.innerHTML = history.map((item) => {
-      const statusBadge = item.status === "completed"
-        ? `<span class="badge-completed">Completed</span>`
-        : `<span class="badge-undone">Restored (Undone)</span>`;
+      let statusBadge = "";
+      if (item.status === "completed") {
+        statusBadge = `<span class="badge-completed">Completed</span>`;
+      } else if (item.status === "undone") {
+        statusBadge = `<span class="badge-undone">Restored (Undone)</span>`;
+      } else if (item.status === "recovery_required") {
+        statusBadge = `<span class="badge-recovery-required">Recovery Required</span>`;
+      } else if (item.status === "failed") {
+        statusBadge = `<span class="badge-failed">Failed</span>`;
+      } else if (item.status === "executing") {
+        statusBadge = `<span class="badge-executing">Interrupted</span>`;
+      } else {
+        statusBadge = `<span class="badge-undone">${escapeHtml(item.status)}</span>`;
+      }
 
-      const actionBtn = item.undoAvailable
-        ? `<button type="button" class="button button-secondary button-small btn-org-undo" data-op-id="${escapeHtml(item.operationId)}">Undo</button>`
-        : `<span class="muted" style="font-size: 0.72rem;">—</span>`;
+      let actionBtn = "";
+      if (item.status === "recovery_required") {
+        actionBtn = `<button type="button" class="button button-warning button-small btn-org-recover" data-op-id="${escapeHtml(item.operationId)}" data-reason="${escapeHtml(item.recoveryReason || '')}">Review & Dismiss</button>`;
+      } else if (item.undoAvailable) {
+        actionBtn = `<button type="button" class="button button-secondary button-small btn-org-undo" data-op-id="${escapeHtml(item.operationId)}">Undo</button>`;
+      } else {
+        actionBtn = `<span class="muted" style="font-size: 0.72rem;">—</span>`;
+      }
+
+      const recoveryDetail = item.recoveryReason
+        ? `<div class="recovery-reason-text">⚠ ${escapeHtml(item.recoveryReason)}</div>`
+        : "";
 
       return `
         <tr>
@@ -834,6 +872,7 @@ async function loadOperationHistory() {
               <span style="color: var(--silver); margin: 0 4px;">→</span>
               <span style="color: var(--accent); font-weight: 600;">${escapeHtml(item.destinationPath)}</span>
             </div>
+            ${recoveryDetail}
           </td>
           <td>${statusBadge}</td>
           <td style="font-size: 0.74rem; color: var(--muted);">${escapeHtml(formatDate(item.executedAt))}</td>
@@ -877,6 +916,47 @@ async function handleUndoOperation(operationId) {
     handleScan();
   } catch (error) {
     alert(`Undo request failed: ${error.message}`);
+  }
+}
+
+/**
+ * Resolves an operation flagged as recovery_required after explicit user confirmation.
+ */
+async function handleRecoverOperation(operationId, reason) {
+  if (!operationId) return;
+
+  const confirmed = window.confirm(
+    `Review Recovery for Operation: ${operationId}\n\n` +
+    `Details: ${reason || "Operation interrupted or requires manual verification."}\n\n` +
+    `Safety Notice: Dismissing marks this operation as reviewed in the journal. No files on disk will be automatically moved, deleted, or restored.\n\n` +
+    `Do you want to dismiss this recovery warning?`
+  );
+  if (!confirmed) return;
+
+  try {
+    const response = await fetch("/api/organization/recover", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json"
+      },
+      body: JSON.stringify({
+        operationId,
+        resolution: "dismiss"
+      })
+    });
+
+    const body = await response.json();
+    if (!response.ok || !body.success) {
+      const err = body.error || {};
+      const code = err.code ? `[${err.code}] ` : "";
+      alert(`Recovery resolution failed: ${code}${err.message || "Unable to resolve operation."}`);
+      return;
+    }
+
+    await loadOperationHistory();
+  } catch (error) {
+    alert(`Recovery request failed: ${error.message}`);
   }
 }
 
@@ -924,12 +1004,20 @@ recCardsContainer.addEventListener("click", (event) => {
   }
 });
 
-// History table undo delegation
+// History table undo & recovery delegation
 orgHistoryBody.addEventListener("click", (event) => {
   const undoBtn = event.target.closest(".btn-org-undo");
   if (undoBtn) {
     const opId = undoBtn.dataset.opId;
     handleUndoOperation(opId);
+    return;
+  }
+
+  const recoverBtn = event.target.closest(".btn-org-recover");
+  if (recoverBtn) {
+    const opId = recoverBtn.dataset.opId;
+    const reason = recoverBtn.dataset.reason;
+    handleRecoverOperation(opId, reason);
   }
 });
 

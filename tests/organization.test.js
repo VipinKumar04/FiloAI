@@ -10,8 +10,16 @@ const {
   previewOperation,
   executeOperation,
   undoOperation,
-  getOperationHistory
+  resolveRecoveryOperation,
+  getOperationHistory,
+  initOrganizationService,
+  resetServiceState
 } = require("../backend/services/organizationService");
+const {
+  readJournalEntries,
+  appendJournalEntry,
+  loadAndRecoverJournal
+} = require("../backend/services/recoveryJournal");
 
 function startTestServer() {
   return new Promise((resolve) => {
@@ -610,3 +618,479 @@ test("POST /api/organization/preview rejects symlink source files", async (t) =>
   }
 });
 
+test("POST /api/organization/execute rejects duplicate concurrent execution requests", async (t) => {
+  const tempDir = createTempDir("filo-org-concurrent-");
+  const originalScanRoot = process.env.FILO_SCAN_ROOT;
+  process.env.FILO_SCAN_ROOT = tempDir;
+
+  fs.writeFileSync(path.join(tempDir, "concurrent.txt"), "race test data", "utf8");
+
+  const { server, baseUrl } = await startTestServer();
+
+  t.after(() => new Promise((resolve, reject) => {
+    process.env.FILO_SCAN_ROOT = originalScanRoot;
+    removeDirRecursive(tempDir);
+    server.close((error) => error ? reject(error) : resolve());
+  }));
+
+  const previewRes = await fetch(`${baseUrl}/api/organization/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sourcePath: "concurrent.txt", destinationDir: "target" })
+  });
+  const { operationId, approvalToken } = (await previewRes.json()).data;
+
+  // Fire two execution requests concurrently
+  const [res1, res2] = await Promise.all([
+    fetch(`${baseUrl}/api/organization/execute`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ operationId, approvalToken })
+    }),
+    fetch(`${baseUrl}/api/organization/execute`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ operationId, approvalToken })
+    })
+  ]);
+
+  const statuses = [res1.status, res2.status].sort();
+  // Exactly one request must succeed (200), and the second must be rejected (409)
+  assert.equal(statuses[0], 200, "One request must succeed");
+  assert.equal(statuses[1], 409, "Second concurrent request must be rejected with 409 conflict");
+
+  // Verify file was moved exactly once and exists at destination
+  assert.equal(fs.existsSync(path.join(tempDir, "target", "concurrent.txt")), true);
+  assert.equal(fs.existsSync(path.join(tempDir, "concurrent.txt")), false);
+});
+
+test("executeOperation simulates cross-device fallback with verified copy and source unlink", async (t) => {
+  const tempDir = createTempDir("filo-org-exdev-");
+  const originalScanRoot = process.env.FILO_SCAN_ROOT;
+  process.env.FILO_SCAN_ROOT = tempDir;
+
+  const content = "Cross-device payload content";
+  fs.writeFileSync(path.join(tempDir, "crossdev.txt"), content, "utf8");
+
+  const journalPath = path.join(tempDir, "exdev-journal.jsonl");
+
+  t.after(() => {
+    process.env.FILO_SCAN_ROOT = originalScanRoot;
+    removeDirRecursive(tempDir);
+  });
+
+  const previewResult = await previewOperation(
+    { sourcePath: "crossdev.txt", destinationDir: "cross-target" },
+    { approvedRoot: tempDir }
+  );
+  assert.equal(previewResult.success, true);
+  const { operationId, approvalToken } = previewResult.data;
+
+  // Temporarily monkey-patch fs.promises.rename to simulate EXDEV
+  const originalRename = fs.promises.rename;
+  let renameCalled = false;
+  fs.promises.rename = async () => {
+    renameCalled = true;
+    const err = new Error("Cross-device link");
+    err.code = "EXDEV";
+    throw err;
+  };
+
+  try {
+    const execResult = await executeOperation(
+      { operationId, approvalToken },
+      { approvedRoot: tempDir, journalPath }
+    );
+
+    assert.equal(execResult.success, true);
+    assert.equal(execResult.data.status, "completed");
+    assert.equal(renameCalled, true, "Rename was called and threw EXDEV");
+
+    // Verify file moved to destination and unlinked from source
+    const destPath = path.join(tempDir, "cross-target", "crossdev.txt");
+    assert.equal(fs.existsSync(destPath), true);
+    assert.equal(fs.readFileSync(destPath, "utf8"), content);
+    assert.equal(fs.existsSync(path.join(tempDir, "crossdev.txt")), false);
+  } finally {
+    fs.promises.rename = originalRename;
+  }
+});
+
+test("executeOperation preserves source and cleans destination if cross-device copy fails", async (t) => {
+  const tempDir = createTempDir("filo-org-copyfail-");
+  const originalScanRoot = process.env.FILO_SCAN_ROOT;
+  process.env.FILO_SCAN_ROOT = tempDir;
+
+  const content = "Preserve source content";
+  fs.writeFileSync(path.join(tempDir, "preserve.txt"), content, "utf8");
+
+  const journalPath = path.join(tempDir, "copyfail-journal.jsonl");
+
+  t.after(() => {
+    process.env.FILO_SCAN_ROOT = originalScanRoot;
+    removeDirRecursive(tempDir);
+  });
+
+  const previewResult = await previewOperation(
+    { sourcePath: "preserve.txt", destinationDir: "fail-target" },
+    { approvedRoot: tempDir }
+  );
+  const { operationId, approvalToken } = previewResult.data;
+
+  const originalRename = fs.promises.rename;
+  const originalCopyFile = fs.promises.copyFile;
+
+  fs.promises.rename = async () => {
+    const err = new Error("Cross-device link");
+    err.code = "EXDEV";
+    throw err;
+  };
+  fs.promises.copyFile = async () => {
+    throw new Error("Simulated disk error during copy");
+  };
+
+  try {
+    const execResult = await executeOperation(
+      { operationId, approvalToken },
+      { approvedRoot: tempDir, journalPath }
+    );
+
+    assert.equal(execResult.success, false);
+    assert.equal(execResult.status, 500);
+    assert.equal(execResult.error.code, "COPY_FAILED");
+
+    // CRITICAL: Source file MUST remain intact!
+    assert.equal(fs.existsSync(path.join(tempDir, "preserve.txt")), true);
+    assert.equal(fs.readFileSync(path.join(tempDir, "preserve.txt"), "utf8"), content);
+    // Destination file must NOT exist
+    assert.equal(fs.existsSync(path.join(tempDir, "fail-target", "preserve.txt")), false);
+  } finally {
+    fs.promises.rename = originalRename;
+    fs.promises.copyFile = originalCopyFile;
+  }
+});
+
+test("executeOperation flags recovery_required if source unlink fails after cross-device copy", async (t) => {
+  const tempDir = createTempDir("filo-org-unlinkfail-");
+  const originalScanRoot = process.env.FILO_SCAN_ROOT;
+  process.env.FILO_SCAN_ROOT = tempDir;
+
+  const content = "Both files will exist";
+  fs.writeFileSync(path.join(tempDir, "both.txt"), content, "utf8");
+
+  const journalPath = path.join(tempDir, "unlinkfail-journal.jsonl");
+
+  t.after(() => {
+    process.env.FILO_SCAN_ROOT = originalScanRoot;
+    removeDirRecursive(tempDir);
+  });
+
+  const previewResult = await previewOperation(
+    { sourcePath: "both.txt", destinationDir: "target" },
+    { approvedRoot: tempDir }
+  );
+  const { operationId, approvalToken } = previewResult.data;
+
+  const originalRename = fs.promises.rename;
+  const originalUnlink = fs.promises.unlink;
+
+  fs.promises.rename = async () => {
+    const err = new Error("Cross-device link");
+    err.code = "EXDEV";
+    throw err;
+  };
+  fs.promises.unlink = async () => {
+    throw new Error("Simulated permission error on source unlink");
+  };
+
+  try {
+    const execResult = await executeOperation(
+      { operationId, approvalToken },
+      { approvedRoot: tempDir, journalPath }
+    );
+
+    assert.equal(execResult.success, false);
+    assert.equal(execResult.status, 500);
+    assert.equal(execResult.error.code, "RECOVERY_REQUIRED");
+
+    // Both files exist on disk
+    assert.equal(fs.existsSync(path.join(tempDir, "both.txt")), true);
+    assert.equal(fs.existsSync(path.join(tempDir, "target", "both.txt")), true);
+  } finally {
+    fs.promises.rename = originalRename;
+    fs.promises.unlink = originalUnlink;
+  }
+});
+
+test("POST /api/organization/undo rejects when destination file was modified after move", async (t) => {
+  const tempDir = createTempDir("filo-org-undotamper-");
+  const originalScanRoot = process.env.FILO_SCAN_ROOT;
+  process.env.FILO_SCAN_ROOT = tempDir;
+
+  fs.writeFileSync(path.join(tempDir, "mod.txt"), "initial content", "utf8");
+
+  const { server, baseUrl } = await startTestServer();
+
+  t.after(() => new Promise((resolve, reject) => {
+    process.env.FILO_SCAN_ROOT = originalScanRoot;
+    removeDirRecursive(tempDir);
+    server.close((error) => error ? reject(error) : resolve());
+  }));
+
+  const previewRes = await fetch(`${baseUrl}/api/organization/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sourcePath: "mod.txt", destinationDir: "moved" })
+  });
+  const { operationId, approvalToken } = (await previewRes.json()).data;
+
+  await fetch(`${baseUrl}/api/organization/execute`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ operationId, approvalToken })
+  });
+
+  // Tamper: Modify destination file (e.g. user edited it)
+  const destPath = path.join(tempDir, "moved", "mod.txt");
+  fs.writeFileSync(destPath, "tampered and edited destination file with longer size", "utf8");
+
+  const undoRes = await fetch(`${baseUrl}/api/organization/undo`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ operationId })
+  });
+  const undoBody = await undoRes.json();
+
+  assert.equal(undoRes.status, 409);
+  assert.equal(undoBody.error.code, "DESTINATION_FILE_MODIFIED");
+
+  // Tampered file is preserved at destination and NOT deleted
+  assert.equal(fs.existsSync(destPath), true);
+  assert.equal(fs.existsSync(path.join(tempDir, "mod.txt")), false);
+});
+
+test("loadAndRecoverJournal detects interrupted operation on startup without modifying files", async (t) => {
+  const tempDir = createTempDir("filo-org-startup-");
+  const journalPath = path.join(tempDir, "recovery-journal.jsonl");
+
+  // File exists at source
+  const sourceFile = path.join(tempDir, "interrupted.txt");
+  fs.writeFileSync(sourceFile, "important data", "utf8");
+
+  t.after(() => removeDirRecursive(tempDir));
+
+  // Simulate an interrupted operation journaled as 'executing' right before a crash
+  await appendJournalEntry({
+    operationId: "op_interrupted123",
+    status: "executing",
+    sourcePath: "interrupted.txt",
+    destinationPath: "target/interrupted.txt",
+    destinationDir: "target",
+    fileName: "interrupted.txt",
+    sizeBytes: 14
+  }, { journalPath });
+
+  const result = await loadAndRecoverJournal({
+    canonicalRoot: tempDir,
+    journalPath
+  });
+
+  assert.equal(result.recoveryRequiredCount, 1);
+  const op = result.operations.get("op_interrupted123");
+  assert.ok(op);
+  assert.equal(op.status, "recovery_required");
+  assert.ok(op.recoveryReason.includes("Interrupted before move"));
+
+  // CRITICAL: Startup recovery must NOT move, delete, or modify files
+  assert.equal(fs.existsSync(sourceFile), true);
+  assert.equal(fs.readFileSync(sourceFile, "utf8"), "important data");
+  assert.equal(fs.existsSync(path.join(tempDir, "target", "interrupted.txt")), false);
+});
+
+test("readJournalEntries safely skips corrupted and malformed lines", async (t) => {
+  const tempDir = createTempDir("filo-org-corrupt-");
+  const journalPath = path.join(tempDir, "corrupted.jsonl");
+
+  t.after(() => removeDirRecursive(tempDir));
+
+  const validEntry = {
+    operationId: "op_valid1",
+    status: "completed",
+    sourcePath: "file1.txt",
+    destinationPath: "sub/file1.txt",
+    destinationDir: "sub",
+    fileName: "file1.txt"
+  };
+
+  const lines = [
+    JSON.stringify(validEntry),
+    "{ broken json syntax line",
+    "", // blank line
+    "123456", // valid json but not an object matching schema
+    JSON.stringify({ ...validEntry, operationId: "op_valid2" })
+  ];
+
+  fs.writeFileSync(journalPath, lines.join("\n"), "utf8");
+
+  const result = await readJournalEntries({ journalPath });
+  assert.equal(result.entries.length, 2);
+  assert.equal(result.entries[0].operationId, "op_valid1");
+  assert.equal(result.entries[1].operationId, "op_valid2");
+  assert.equal(result.corruptedLinesCount, 2);
+});
+
+test("recovery journal persists completed operations across service restarts", async (t) => {
+  const tempDir = createTempDir("filo-org-restart-");
+  const journalPath = path.join(tempDir, "persist-journal.jsonl");
+
+  fs.writeFileSync(path.join(tempDir, "restart.txt"), "restart test", "utf8");
+
+  t.after(() => {
+    resetServiceState();
+    removeDirRecursive(tempDir);
+  });
+
+  resetServiceState();
+
+  const previewRes = await previewOperation(
+    { sourcePath: "restart.txt", destinationDir: "saved" },
+    { approvedRoot: tempDir }
+  );
+  const { operationId, approvalToken } = previewRes.data;
+
+  const execRes = await executeOperation(
+    { operationId, approvalToken },
+    { approvedRoot: tempDir, journalPath }
+  );
+  assert.equal(execRes.success, true);
+
+  // Simulate server restart: wipe memory
+  resetServiceState();
+  assert.equal(getOperationHistory().history.length, 0);
+
+  // Re-initialize from persistent journal
+  await initOrganizationService({ approvedRoot: tempDir, journalPath });
+
+  const historyData = getOperationHistory();
+  assert.equal(historyData.history.length, 1);
+  assert.equal(historyData.history[0].operationId, operationId);
+  assert.equal(historyData.history[0].status, "completed");
+  assert.equal(historyData.history[0].sourcePath, "restart.txt");
+  assert.equal(historyData.history[0].destinationPath, "saved/restart.txt");
+});
+
+test("POST /api/organization/recover allows user to review and resolve recovery_required operation", async (t) => {
+  const tempDir = createTempDir("filo-org-recoverroute-");
+  const journalPath = path.join(tempDir, "recover-journal.jsonl");
+  const originalScanRoot = process.env.FILO_SCAN_ROOT;
+  const originalJournalPath = process.env.FILO_JOURNAL_PATH;
+
+  process.env.FILO_SCAN_ROOT = tempDir;
+  process.env.FILO_JOURNAL_PATH = journalPath;
+
+  const { server, baseUrl } = await startTestServer();
+
+  t.after(() => new Promise((resolve, reject) => {
+    process.env.FILO_SCAN_ROOT = originalScanRoot;
+    process.env.FILO_JOURNAL_PATH = originalJournalPath;
+    resetServiceState();
+    removeDirRecursive(tempDir);
+    server.close((error) => error ? reject(error) : resolve());
+  }));
+
+  resetServiceState();
+
+  // Create an interrupted journal record
+  await appendJournalEntry({
+    operationId: "op_rec_review",
+    status: "executing",
+    sourcePath: "data.csv",
+    destinationPath: "archive/data.csv",
+    destinationDir: "archive",
+    fileName: "data.csv",
+    sizeBytes: 100
+  }, { journalPath });
+
+  // Init to detect and mark recovery_required
+  await initOrganizationService({ approvedRoot: tempDir, journalPath });
+
+  // History should reflect recovery_required
+  const historyRes = await fetch(`${baseUrl}/api/organization/history`);
+  const historyBody = await historyRes.json();
+  assert.equal(historyBody.data.recoveryRequiredCount, 1);
+
+  // Recover endpoint: dismiss recovery warning
+  const recoverRes = await fetch(`${baseUrl}/api/organization/recover`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ operationId: "op_rec_review", resolution: "dismiss" })
+  });
+  const recoverBody = await recoverRes.json();
+
+  assert.equal(recoverRes.status, 200);
+  assert.equal(recoverBody.success, true);
+  assert.equal(recoverBody.data.status, "failed");
+
+  // History should now have 0 recoveryRequiredCount
+  const afterHistory = await (await fetch(`${baseUrl}/api/organization/history`)).json();
+  assert.equal(afterHistory.data.recoveryRequiredCount, 0);
+});
+
+test("executeOperation flags recovery_required when journal write fails after file move", async (t) => {
+  const tempDir = createTempDir("filo-org-jfail-");
+  const originalScanRoot = process.env.FILO_SCAN_ROOT;
+  process.env.FILO_SCAN_ROOT = tempDir;
+
+  const content = "Journal failure test data";
+  fs.writeFileSync(path.join(tempDir, "jfail.txt"), content, "utf8");
+
+  const journalPath = path.join(tempDir, "jfail-journal.jsonl");
+
+  t.after(() => {
+    resetServiceState();
+    removeDirRecursive(tempDir);
+  });
+
+  const previewRes = await previewOperation(
+    { sourcePath: "jfail.txt", destinationDir: "moved" },
+    { approvedRoot: tempDir }
+  );
+  const { operationId, approvalToken } = previewRes.data;
+
+  // Intercept appendJournalEntry on recoveryJournal
+  const recoveryJournal = require("../backend/services/recoveryJournal");
+  const originalAppend = recoveryJournal.appendJournalEntry;
+  let calls = 0;
+  recoveryJournal.appendJournalEntry = async (entry, opts) => {
+    calls++;
+    if (calls === 2) {
+      // First call is 'executing', second call is 'completed' after move
+      throw new Error("Simulated I/O failure writing completed status to journal");
+    }
+    return originalAppend(entry, opts);
+  };
+
+  try {
+    const execRes = await executeOperation(
+      { operationId, approvalToken },
+      { approvedRoot: tempDir, journalPath }
+    );
+
+    assert.equal(execRes.success, false);
+    assert.equal(execRes.status, 500);
+    assert.equal(execRes.error.code, "JOURNAL_WRITE_FAILED");
+
+    // File was moved to destination
+    assert.equal(fs.existsSync(path.join(tempDir, "moved", "jfail.txt")), true);
+    assert.equal(fs.existsSync(path.join(tempDir, "jfail.txt")), false);
+
+    // Operation is flagged as recovery_required
+    const historyData = getOperationHistory();
+    const item = historyData.history.find((h) => h.operationId === operationId);
+    assert.ok(item);
+    assert.equal(item.status, "recovery_required");
+    assert.ok(item.recoveryReason.includes("journal write failed"));
+  } finally {
+    recoveryJournal.appendJournalEntry = originalAppend;
+  }
+});

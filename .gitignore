@@ -13,3 +13,5 @@ Thumbs.db
 *.swo
 test-fixtures/private/
 scan-workspace/
+data/
+*.jsonl

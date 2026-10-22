@@ -5,12 +5,73 @@ const {
   getApprovedRoot,
   isPathInsideApprovedRoot
 } = require("./scanService");
+const recoveryJournal = require("./recoveryJournal");
 
-// In-memory store for previewed operations and completed history
+// In-memory store for active previewed operations and fast history access
 const previewStore = new Map();
-const operationHistory = [];
+let operationHistory = [];
+const activeExecutionLocks = new Set();
 
 const PREVIEW_EXPIRY_MS = 15 * 60 * 1000; // 15 minutes
+let lastCorruptedLinesCount = 0;
+let lastRecoveryRequiredCount = 0;
+
+/**
+ * Safely appends an entry to the recovery journal without throwing.
+ */
+async function safeAppendJournalEntry(entry, options = {}) {
+  try {
+    return await recoveryJournal.appendJournalEntry(entry, options);
+  } catch (err) {
+    console.warn(`[Recovery Journal] Failed to append entry for ${entry && entry.operationId}:`, err.message);
+    return false;
+  }
+}
+
+/**
+ * Initializes the organization service and synchronizes with the durable recovery journal.
+ * Detects interrupted operations and transitions them to 'recovery_required' without altering files on disk.
+ *
+ * @param {object} [options={}]
+ * @returns {Promise<{ recoveryRequiredCount: number, corruptedLinesCount: number }>}
+ */
+async function initOrganizationService(options = {}) {
+  let canonicalRoot = null;
+  try {
+    const rawRoot = options.approvedRoot ? path.resolve(options.approvedRoot) : getApprovedRoot();
+    if (fs.existsSync(rawRoot)) {
+      canonicalRoot = fs.realpathSync(rawRoot);
+    }
+  } catch {
+    // Ignore root resolution failure during early initialization
+  }
+
+  const result = await recoveryJournal.loadAndRecoverJournal({
+    canonicalRoot,
+    journalPath: options.journalPath
+  });
+
+  operationHistory = result.history;
+  lastCorruptedLinesCount = result.corruptedLinesCount;
+  lastRecoveryRequiredCount = result.recoveryRequiredCount;
+
+  // Sync loaded operations into previewStore for undo lookups
+  for (const [opId, op] of result.operations.entries()) {
+    if (!previewStore.has(opId)) {
+      previewStore.set(opId, {
+        ...op,
+        sourceRelative: op.sourcePath,
+        destRelative: op.destinationPath,
+        destDirRelative: op.destinationDir
+      });
+    }
+  }
+
+  return {
+    recoveryRequiredCount: result.recoveryRequiredCount,
+    corruptedLinesCount: result.corruptedLinesCount
+  };
+}
 
 /**
  * Validates and previews a proposed file organization move.
@@ -252,6 +313,9 @@ async function previewOperation(params = {}, options = {}) {
   const preview = {
     operationId,
     approvalToken,
+    sourcePath: sourceRelative,
+    destinationPath: destRelative,
+    destinationDir: destDirRelative,
     sourceRelative,
     destRelative,
     destDirRelative,
@@ -294,11 +358,12 @@ async function previewOperation(params = {}, options = {}) {
 /**
  * Executes a previously previewed and explicitly approved file organization move.
  * Strictly revalidates all paths, root containment, conflict status, and approval token.
+ * Records state changes to the durable recovery journal with concurrency protection.
  *
  * @param {object} params
  * @param {string} params.operationId - The ID generated during preview
  * @param {string} params.approvalToken - The secure token issued during preview
- * @param {object} [options={}] - Options including custom approvedRoot
+ * @param {object} [options={}] - Options including custom approvedRoot and journalPath
  * @returns {Promise<{ success: boolean, data?: object, error?: object, status?: number }>}
  */
 async function executeOperation(params = {}, options = {}) {
@@ -326,9 +391,36 @@ async function executeOperation(params = {}, options = {}) {
     };
   }
 
-  // 1. Lookup preview in store
-  const record = previewStore.get(operationId.trim());
+  const cleanOpId = operationId.trim();
+
+  // 1. Concurrency guard: reject concurrent execution attempts on the same operationId
+  if (activeExecutionLocks.has(cleanOpId)) {
+    return {
+      success: false,
+      status: 409,
+      error: {
+        code: "OPERATION_ALREADY_IN_PROGRESS",
+        message: "This operation is currently being executed. Duplicate concurrent execution is prohibited."
+      }
+    };
+  }
+
+  // 2. Lookup preview in store
+  const record = previewStore.get(cleanOpId);
   if (!record) {
+    // Check if it's already in history
+    const existingHistory = operationHistory.find((h) => h.operationId === cleanOpId);
+    if (existingHistory) {
+      return {
+        success: false,
+        status: 409,
+        error: {
+          code: "ALREADY_COMPLETED",
+          message: `This operation has already been ${existingHistory.status}. Replaying approval is prohibited.`
+        }
+      };
+    }
+
     return {
       success: false,
       status: 404,
@@ -339,19 +431,30 @@ async function executeOperation(params = {}, options = {}) {
     };
   }
 
-  // 2. Validate operation status
+  // 3. Validate operation status
+  if (record.status === "executing") {
+    return {
+      success: false,
+      status: 409,
+      error: {
+        code: "OPERATION_ALREADY_IN_PROGRESS",
+        message: "This operation is already executing. Concurrent execution is prohibited."
+      }
+    };
+  }
+
   if (record.status !== "previewed") {
     return {
       success: false,
       status: 409,
       error: {
         code: "INVALID_OPERATION_STATE",
-        message: `This operation has already been ${record.status}.`
+        message: `This operation has already been ${record.status}. Replaying approval is prohibited.`
       }
     };
   }
 
-  // 3. Verify token expiration
+  // 4. Verify token expiration
   if (Date.now() > record.expiresAt) {
     previewStore.delete(record.operationId);
     return {
@@ -364,7 +467,7 @@ async function executeOperation(params = {}, options = {}) {
     };
   }
 
-  // 4. Constant-time timing-safe token verification
+  // 5. Constant-time timing-safe token verification
   const tokenBuf = Buffer.from(approvalToken.trim());
   const expectedBuf = Buffer.from(record.approvalToken);
   if (tokenBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(tokenBuf, expectedBuf)) {
@@ -378,220 +481,370 @@ async function executeOperation(params = {}, options = {}) {
     };
   }
 
-  // 5. Revalidate approved root containment
-  let canonicalRoot;
+  // 6. Acquire execution lock and transition status to 'executing'
+  activeExecutionLocks.add(cleanOpId);
+  record.status = "executing";
+
+  // Journal the in-flight state immediately before performing filesystem actions
   try {
-    const rawRoot = options.approvedRoot ? path.resolve(options.approvedRoot) : getApprovedRoot();
-    if (!fs.existsSync(rawRoot)) {
+    await recoveryJournal.appendJournalEntry({
+      operationId: record.operationId,
+      status: "executing",
+      sourcePath: record.sourceRelative,
+      destinationPath: record.destRelative,
+      destinationDir: record.destDirRelative,
+      fileName: record.fileName,
+      sizeBytes: record.sizeBytes,
+      recommendationId: record.recommendationId,
+      rationale: record.rationale
+    }, options);
+  } catch (journalErr) {
+    activeExecutionLocks.delete(cleanOpId);
+    record.status = "previewed"; // Restore preview status if pre-execution journal fails
+    return {
+      success: false,
+      status: 500,
+      error: {
+        code: "JOURNAL_WRITE_FAILED",
+        message: `Failed to write to recovery journal prior to execution: ${journalErr.message}`
+      }
+    };
+  }
+
+  try {
+    // 7. Revalidate approved root containment
+    let canonicalRoot;
+    try {
+      const rawRoot = options.approvedRoot ? path.resolve(options.approvedRoot) : getApprovedRoot();
+      if (!fs.existsSync(rawRoot)) {
+        record.status = "failed";
+        await safeAppendJournalEntry({ ...record, status: "failed", error: "Root directory missing" }, options);
+        return {
+          success: false,
+          status: 404,
+          error: {
+            code: "DIRECTORY_NOT_FOUND",
+            message: "The approved scan root directory does not exist."
+          }
+        };
+      }
+      canonicalRoot = fs.realpathSync(rawRoot);
+    } catch {
+      record.status = "failed";
+      await safeAppendJournalEntry({ ...record, status: "failed", error: "Cannot resolve approved root" }, options);
+      return {
+        success: false,
+        status: 500,
+        error: {
+          code: "INTERNAL_ERROR",
+          message: "Unable to resolve the approved scan root."
+        }
+      };
+    }
+
+    const resolvedSource = path.resolve(canonicalRoot, record.sourceRelative);
+    const resolvedDestDir = path.resolve(canonicalRoot, record.destDirRelative);
+    const resolvedDestPath = path.resolve(canonicalRoot, record.destRelative);
+
+    if (
+      !isPathInsideApprovedRoot(resolvedSource, canonicalRoot) ||
+      !isPathInsideApprovedRoot(resolvedDestDir, canonicalRoot) ||
+      !isPathInsideApprovedRoot(resolvedDestPath, canonicalRoot)
+    ) {
+      record.status = "failed";
+      await safeAppendJournalEntry({ ...record, status: "failed", error: "Path traversal outside root" }, options);
+      return {
+        success: false,
+        status: 403,
+        error: {
+          code: "OUTSIDE_APPROVED_ROOT",
+          message: "Access denied: One or more paths escape the approved scan root."
+        }
+      };
+    }
+
+    // 8. Confirm source file still exists and has not been modified or replaced
+    if (!fs.existsSync(resolvedSource)) {
+      record.status = "failed";
+      await safeAppendJournalEntry({ ...record, status: "failed", error: "Source file missing" }, options);
       return {
         success: false,
         status: 404,
         error: {
-          code: "DIRECTORY_NOT_FOUND",
-          message: "The approved scan root directory does not exist."
+          code: "SOURCE_FILE_MISSING",
+          message: "Source file no longer exists at the expected location."
         }
       };
     }
-    canonicalRoot = fs.realpathSync(rawRoot);
-  } catch {
-    return {
-      success: false,
-      status: 500,
-      error: {
-        code: "INTERNAL_ERROR",
-        message: "Unable to resolve the approved scan root."
-      }
-    };
-  }
 
-  const resolvedSource = path.resolve(canonicalRoot, record.sourceRelative);
-  const resolvedDestDir = path.resolve(canonicalRoot, record.destDirRelative);
-  const resolvedDestPath = path.resolve(canonicalRoot, record.destRelative);
+    let currentLstat;
+    try {
+      currentLstat = await fs.promises.lstat(resolvedSource);
+    } catch {
+      record.status = "failed";
+      await safeAppendJournalEntry({ ...record, status: "failed", error: "Cannot inspect source entry" }, options);
+      return {
+        success: false,
+        status: 400,
+        error: {
+          code: "INVALID_SOURCE",
+          message: "Unable to inspect source file entry."
+        }
+      };
+    }
 
-  if (
-    !isPathInsideApprovedRoot(resolvedSource, canonicalRoot) ||
-    !isPathInsideApprovedRoot(resolvedDestDir, canonicalRoot) ||
-    !isPathInsideApprovedRoot(resolvedDestPath, canonicalRoot)
-  ) {
-    return {
-      success: false,
-      status: 403,
-      error: {
-        code: "OUTSIDE_APPROVED_ROOT",
-        message: "Access denied: One or more paths escape the approved scan root."
-      }
-    };
-  }
+    if (currentLstat.isSymbolicLink()) {
+      record.status = "failed";
+      await safeAppendJournalEntry({ ...record, status: "failed", error: "Source is symbolic link" }, options);
+      return {
+        success: false,
+        status: 400,
+        error: {
+          code: "SYMLINK_NOT_ALLOWED",
+          message: "Source file cannot be a symbolic link."
+        }
+      };
+    }
 
-  // 6. Confirm source file still exists and has not been modified or replaced
-  if (!fs.existsSync(resolvedSource)) {
-    return {
-      success: false,
-      status: 404,
-      error: {
-        code: "SOURCE_FILE_MISSING",
-        message: "Source file no longer exists at the expected location."
-      }
-    };
-  }
+    let currentSourceStat;
+    try {
+      currentSourceStat = await fs.promises.stat(resolvedSource);
+    } catch {
+      record.status = "failed";
+      await safeAppendJournalEntry({ ...record, status: "failed", error: "Cannot stat source" }, options);
+      return {
+        success: false,
+        status: 400,
+        error: {
+          code: "INVALID_SOURCE",
+          message: "Unable to verify current source file status."
+        }
+      };
+    }
 
-  let currentLstat;
-  try {
-    currentLstat = await fs.promises.lstat(resolvedSource);
-  } catch {
-    return {
-      success: false,
-      status: 400,
-      error: {
-        code: "INVALID_SOURCE",
-        message: "Unable to inspect source file entry."
-      }
-    };
-  }
+    if (!currentSourceStat.isFile()) {
+      record.status = "failed";
+      await safeAppendJournalEntry({ ...record, status: "failed", error: "Not a regular file" }, options);
+      return {
+        success: false,
+        status: 400,
+        error: {
+          code: "NOT_A_REGULAR_FILE",
+          message: "Source entry is no longer a regular file."
+        }
+      };
+    }
 
-  if (currentLstat.isSymbolicLink()) {
-    return {
-      success: false,
-      status: 400,
-      error: {
-        code: "SYMLINK_NOT_ALLOWED",
-        message: "Source file cannot be a symbolic link."
-      }
-    };
-  }
+    if (currentSourceStat.size !== record.sizeBytes) {
+      record.status = "failed";
+      await safeAppendJournalEntry({ ...record, status: "failed", error: "Source modified" }, options);
+      return {
+        success: false,
+        status: 409,
+        error: {
+          code: "SOURCE_MODIFIED",
+          message: "Source file was modified after preview. Please preview again."
+        }
+      };
+    }
 
-  let currentSourceStat;
-  try {
-    currentSourceStat = await fs.promises.stat(resolvedSource);
-  } catch {
-    return {
-      success: false,
-      status: 400,
-      error: {
-        code: "INVALID_SOURCE",
-        message: "Unable to verify current source file status."
-      }
-    };
-  }
+    // 9. Strict destination conflict check: NEVER overwrite an existing file!
+    if (fs.existsSync(resolvedDestPath)) {
+      record.status = "failed";
+      await safeAppendJournalEntry({ ...record, status: "failed", error: "Destination conflict" }, options);
+      return {
+        success: false,
+        status: 409,
+        error: {
+          code: "DESTINATION_CONFLICT",
+          message: "Destination file already exists. Overwrite is strictly prohibited."
+        }
+      };
+    }
 
-  if (!currentSourceStat.isFile()) {
-    return {
-      success: false,
-      status: 400,
-      error: {
-        code: "NOT_A_REGULAR_FILE",
-        message: "Source entry is no longer a regular file."
-      }
-    };
-  }
+    // 10. Safely ensure destination subdirectory exists inside approved root
+    try {
+      await fs.promises.mkdir(resolvedDestDir, { recursive: true });
+    } catch (err) {
+      record.status = "failed";
+      await safeAppendJournalEntry({ ...record, status: "failed", error: `Directory creation failed: ${err.message}` }, options);
+      return {
+        success: false,
+        status: 500,
+        error: {
+          code: "DIRECTORY_CREATION_FAILED",
+          message: `Failed to create destination directory: ${err.message}`
+        }
+      };
+    }
 
-  if (currentSourceStat.size !== record.sizeBytes) {
-    return {
-      success: false,
-      status: 409,
-      error: {
-        code: "SOURCE_MODIFIED",
-        message: "Source file was modified after preview. Please preview again."
-      }
-    };
-  }
+    // 11. Perform atomic move with verified cross-device fallback
+    try {
+      await fs.promises.rename(resolvedSource, resolvedDestPath);
+    } catch (renameErr) {
+      if (renameErr.code === "EXDEV") {
+        // Cross-device fallback with verified copy and destination preservation
+        let copyCompleted = false;
+        try {
+          await fs.promises.copyFile(resolvedSource, resolvedDestPath, fs.constants.COPYFILE_EXCL);
+          copyCompleted = true;
 
-  // 7. Strict destination conflict check: NEVER overwrite an existing file!
-  if (fs.existsSync(resolvedDestPath)) {
-    return {
-      success: false,
-      status: 409,
-      error: {
-        code: "DESTINATION_CONFLICT",
-        message: "Destination file already exists. Overwrite is strictly prohibited."
-      }
-    };
-  }
+          // Verify copied file exists and size matches source before removing source
+          const destStat = await fs.promises.stat(resolvedDestPath);
+          if (destStat.size !== record.sizeBytes) {
+            throw new Error(`Copied destination file size (${destStat.size}B) does not match source (${record.sizeBytes}B)`);
+          }
 
-  // 8. Safely ensure destination subdirectory exists inside approved root
-  try {
-    await fs.promises.mkdir(resolvedDestDir, { recursive: true });
-  } catch (err) {
-    return {
-      success: false,
-      status: 500,
-      error: {
-        code: "DIRECTORY_CREATION_FAILED",
-        message: `Failed to create destination directory: ${err.message}`
-      }
-    };
-  }
-
-  // 9. Perform atomic move
-  try {
-    await fs.promises.rename(resolvedSource, resolvedDestPath);
-  } catch (renameErr) {
-    if (renameErr.code === "EXDEV") {
-      // Cross-device fallback with exclusive copy
-      try {
-        await fs.promises.copyFile(resolvedSource, resolvedDestPath, fs.constants.COPYFILE_EXCL);
-        await fs.promises.unlink(resolvedSource);
-      } catch (copyErr) {
+          await fs.promises.unlink(resolvedSource);
+        } catch (copyErr) {
+          if (!copyCompleted) {
+            // Copy failed before completing: preserve source intact, remove partial destination if present
+            try {
+              if (fs.existsSync(resolvedDestPath)) {
+                await fs.promises.unlink(resolvedDestPath);
+              }
+            } catch {
+              // Ignore cleanup error
+            }
+            record.status = "failed";
+            await safeAppendJournalEntry({ ...record, status: "failed", error: `Copy failed: ${copyErr.message}` }, options);
+            return {
+              success: false,
+              status: 500,
+              error: {
+                code: "COPY_FAILED",
+                message: `Cross-device move failed: ${copyErr.message}. Source file remains unchanged.`
+              }
+            };
+          } else {
+            // Copy completed, but unlinking source failed: both copies exist!
+            // Transition to recovery_required state
+            record.status = "recovery_required";
+            record.recoveryReason = `Destination file copied, but source could not be deleted: ${copyErr.message}`;
+            await safeAppendJournalEntry({ ...record, status: "recovery_required", error: copyErr.message }, options);
+            operationHistory.unshift({
+              operationId: record.operationId,
+              sourcePath: record.sourceRelative,
+              destinationPath: record.destRelative,
+              destinationDir: record.destDirRelative,
+              fileName: record.fileName,
+              sizeBytes: record.sizeBytes,
+              recommendationId: record.recommendationId,
+              rationale: record.rationale,
+              status: "recovery_required",
+              recoveryReason: record.recoveryReason,
+              executedAt: new Date().toISOString()
+            });
+            lastRecoveryRequiredCount++;
+            return {
+              success: false,
+              status: 500,
+              error: {
+                code: "RECOVERY_REQUIRED",
+                message: `Destination file was copied successfully, but source could not be removed: ${copyErr.message}. Operation marked as requiring recovery.`
+              }
+            };
+          }
+        }
+      } else {
+        record.status = "failed";
+        await safeAppendJournalEntry({ ...record, status: "failed", error: renameErr.message }, options);
         return {
           success: false,
           status: 500,
           error: {
             code: "MOVE_FAILED",
-            message: `Cross-device move failed: ${copyErr.message}`
+            message: `Unable to move file: ${renameErr.message}`
           }
         };
       }
-    } else {
+    }
+
+    // 12. Move succeeded: update record and journal status as 'completed'
+    const executedAt = new Date().toISOString();
+    record.status = "completed";
+    record.executedAt = executedAt;
+    record.undoAvailable = true;
+
+    try {
+      await recoveryJournal.appendJournalEntry({
+        operationId: record.operationId,
+        status: "completed",
+        sourcePath: record.sourceRelative,
+        destinationPath: record.destRelative,
+        destinationDir: record.destDirRelative,
+        fileName: record.fileName,
+        sizeBytes: record.sizeBytes,
+        recommendationId: record.recommendationId,
+        rationale: record.rationale,
+        executedAt
+      }, options);
+    } catch (journalWriteErr) {
+      // The file was moved on disk, but writing the completed record to the journal failed
+      record.status = "recovery_required";
+      record.recoveryReason = `File moved on disk, but journal write failed: ${journalWriteErr.message}`;
+      operationHistory.unshift({
+        operationId: record.operationId,
+        sourcePath: record.sourceRelative,
+        destinationPath: record.destRelative,
+        destinationDir: record.destDirRelative,
+        fileName: record.fileName,
+        sizeBytes: record.sizeBytes,
+        recommendationId: record.recommendationId,
+        rationale: record.rationale,
+        status: "recovery_required",
+        recoveryReason: `File moved on disk, but journal write failed: ${journalWriteErr.message}`,
+        executedAt
+      });
+      lastRecoveryRequiredCount++;
       return {
         success: false,
         status: 500,
         error: {
-          code: "MOVE_FAILED",
-          message: `Unable to move file: ${renameErr.message}`
+          code: "JOURNAL_WRITE_FAILED",
+          message: `File moved on disk, but failed to record completion to recovery journal: ${journalWriteErr.message}. Marked as recovery required.`
         }
       };
     }
-  }
 
-  // 10. Update record and record in operation history
-  const executedAt = new Date().toISOString();
-  record.status = "completed";
-  record.executedAt = executedAt;
-
-  const historyItem = {
-    operationId: record.operationId,
-    sourcePath: record.sourceRelative,
-    destinationPath: record.destRelative,
-    destinationDir: record.destDirRelative,
-    fileName: record.fileName,
-    sizeBytes: record.sizeBytes,
-    recommendationId: record.recommendationId,
-    rationale: record.rationale,
-    status: "completed",
-    executedAt,
-    undoAvailable: true
-  };
-
-  operationHistory.unshift(historyItem);
-
-  return {
-    success: true,
-    status: 200,
-    data: {
+    const historyItem = {
       operationId: record.operationId,
-      status: "completed",
       sourcePath: record.sourceRelative,
       destinationPath: record.destRelative,
       destinationDir: record.destDirRelative,
       fileName: record.fileName,
+      sizeBytes: record.sizeBytes,
+      recommendationId: record.recommendationId,
+      rationale: record.rationale,
+      status: "completed",
       executedAt,
       undoAvailable: true
-    }
-  };
+    };
+
+    operationHistory.unshift(historyItem);
+
+    return {
+      success: true,
+      status: 200,
+      data: {
+        operationId: record.operationId,
+        status: "completed",
+        sourcePath: record.sourceRelative,
+        destinationPath: record.destRelative,
+        destinationDir: record.destDirRelative,
+        fileName: record.fileName,
+        executedAt,
+        undoAvailable: true
+      }
+    };
+  } finally {
+    activeExecutionLocks.delete(cleanOpId);
+  }
 }
 
 /**
- * Safely undos a completed file move by verifying destination and restoring source location.
+ * Safely undos a completed file move by verifying destination integrity and restoring source location.
+ * Revalidates that destination file exists, matches expected size, and original source path is unoccupied.
  *
  * @param {object} params
  * @param {string} params.operationId
@@ -612,8 +865,21 @@ async function undoOperation(params = {}, options = {}) {
     };
   }
 
-  const record = previewStore.get(operationId.trim());
-  const historyItem = operationHistory.find((h) => h.operationId === operationId.trim());
+  const cleanOpId = operationId.trim();
+
+  if (activeExecutionLocks.has(cleanOpId)) {
+    return {
+      success: false,
+      status: 409,
+      error: {
+        code: "OPERATION_ALREADY_IN_PROGRESS",
+        message: "Operation is currently active. Concurrent undo request is rejected."
+      }
+    };
+  }
+
+  const record = previewStore.get(cleanOpId);
+  const historyItem = operationHistory.find((h) => h.operationId === cleanOpId);
 
   if (!record || !historyItem) {
     return {
@@ -637,146 +903,291 @@ async function undoOperation(params = {}, options = {}) {
     };
   }
 
-  // 1. Resolve canonical root
-  let canonicalRoot;
+  activeExecutionLocks.add(cleanOpId);
+
   try {
-    const rawRoot = options.approvedRoot ? path.resolve(options.approvedRoot) : getApprovedRoot();
-    if (!fs.existsSync(rawRoot)) {
+    // 1. Resolve canonical root
+    let canonicalRoot;
+    try {
+      const rawRoot = options.approvedRoot ? path.resolve(options.approvedRoot) : getApprovedRoot();
+      if (!fs.existsSync(rawRoot)) {
+        return {
+          success: false,
+          status: 404,
+          error: {
+            code: "DIRECTORY_NOT_FOUND",
+            message: "The approved scan root directory does not exist."
+          }
+        };
+      }
+      canonicalRoot = fs.realpathSync(rawRoot);
+    } catch {
+      return {
+        success: false,
+        status: 500,
+        error: {
+          code: "INTERNAL_ERROR",
+          message: "Unable to resolve the approved scan root."
+        }
+      };
+    }
+
+    const currentFilePath = path.resolve(canonicalRoot, record.destRelative);
+    const restoreSourcePath = path.resolve(canonicalRoot, record.sourceRelative);
+    const restoreSourceDir = path.dirname(restoreSourcePath);
+
+    // 2. Validate containment
+    if (
+      !isPathInsideApprovedRoot(currentFilePath, canonicalRoot) ||
+      !isPathInsideApprovedRoot(restoreSourcePath, canonicalRoot)
+    ) {
+      return {
+        success: false,
+        status: 403,
+        error: {
+          code: "OUTSIDE_APPROVED_ROOT",
+          message: "Access denied: File paths escape the approved scan root."
+        }
+      };
+    }
+
+    // 3. Verify moved file still exists at destination
+    if (!fs.existsSync(currentFilePath)) {
       return {
         success: false,
         status: 404,
         error: {
-          code: "DIRECTORY_NOT_FOUND",
-          message: "The approved scan root directory does not exist."
+          code: "FILE_MOVED_OR_MISSING",
+          message: "The moved file could not be found at its destination location."
         }
       };
     }
-    canonicalRoot = fs.realpathSync(rawRoot);
-  } catch {
-    return {
-      success: false,
-      status: 500,
-      error: {
-        code: "INTERNAL_ERROR",
-        message: "Unable to resolve the approved scan root."
-      }
-    };
-  }
 
-  const currentFilePath = path.resolve(canonicalRoot, record.destRelative);
-  const restoreSourcePath = path.resolve(canonicalRoot, record.sourceRelative);
-  const restoreSourceDir = path.dirname(restoreSourcePath);
+    let currentDestLstat;
+    try {
+      currentDestLstat = await fs.promises.lstat(currentFilePath);
+    } catch {
+      return {
+        success: false,
+        status: 400,
+        error: {
+          code: "INVALID_DESTINATION_FILE",
+          message: "Unable to inspect file at destination."
+        }
+      };
+    }
 
-  // 2. Validate containment
-  if (
-    !isPathInsideApprovedRoot(currentFilePath, canonicalRoot) ||
-    !isPathInsideApprovedRoot(restoreSourcePath, canonicalRoot)
-  ) {
-    return {
-      success: false,
-      status: 403,
-      error: {
-        code: "OUTSIDE_APPROVED_ROOT",
-        message: "Access denied: File paths escape the approved scan root."
-      }
-    };
-  }
+    if (currentDestLstat.isSymbolicLink() || !currentDestLstat.isFile()) {
+      return {
+        success: false,
+        status: 400,
+        error: {
+          code: "NOT_A_REGULAR_FILE",
+          message: "The entry at the destination is not a regular file."
+        }
+      };
+    }
 
-  // 3. Verify moved file still exists at destination
-  if (!fs.existsSync(currentFilePath)) {
-    return {
-      success: false,
-      status: 404,
-      error: {
-        code: "FILE_MOVED_OR_MISSING",
-        message: "The moved file could not be found at its destination location."
-      }
-    };
-  }
+    // Detect if destination file was modified after the move (metadata size verification)
+    if (typeof record.sizeBytes === "number" && currentDestLstat.size !== record.sizeBytes) {
+      return {
+        success: false,
+        status: 409,
+        error: {
+          code: "DESTINATION_FILE_MODIFIED",
+          message: `The file at the destination was modified after it was moved (expected ${record.sizeBytes} bytes, found ${currentDestLstat.size} bytes). Undo aborted to prevent data loss.`
+        }
+      };
+    }
 
-  // 4. Strict check: Original source path must NOT be occupied (prevent overwrite)
-  if (fs.existsSync(restoreSourcePath)) {
-    return {
-      success: false,
-      status: 409,
-      error: {
-        code: "SOURCE_RESTORE_CONFLICT",
-        message: "Cannot undo: A file already exists at the original source location. Overwriting is prohibited."
-      }
-    };
-  }
+    // 4. Strict check: Original source path must NOT be occupied (prevent overwrite)
+    if (fs.existsSync(restoreSourcePath)) {
+      return {
+        success: false,
+        status: 409,
+        error: {
+          code: "SOURCE_RESTORE_CONFLICT",
+          message: "Cannot undo: A file already exists at the original source location. Overwriting is prohibited."
+        }
+      };
+    }
 
-  // 5. Ensure parent directory of original location exists
-  try {
-    await fs.promises.mkdir(restoreSourceDir, { recursive: true });
-  } catch (err) {
-    return {
-      success: false,
-      status: 500,
-      error: {
-        code: "DIRECTORY_CREATION_FAILED",
-        message: `Failed to recreate original folder: ${err.message}`
-      }
-    };
-  }
+    // 5. Ensure parent directory of original location exists
+    try {
+      await fs.promises.mkdir(restoreSourceDir, { recursive: true });
+    } catch (err) {
+      return {
+        success: false,
+        status: 500,
+        error: {
+          code: "DIRECTORY_CREATION_FAILED",
+          message: `Failed to recreate original folder: ${err.message}`
+        }
+      };
+    }
 
-  // 6. Move file back
-  try {
-    await fs.promises.rename(currentFilePath, restoreSourcePath);
-  } catch (renameErr) {
-    if (renameErr.code === "EXDEV") {
-      try {
-        await fs.promises.copyFile(currentFilePath, restoreSourcePath, fs.constants.COPYFILE_EXCL);
-        await fs.promises.unlink(currentFilePath);
-      } catch (copyErr) {
+    // 6. Move file back to original location
+    try {
+      await fs.promises.rename(currentFilePath, restoreSourcePath);
+    } catch (renameErr) {
+      if (renameErr.code === "EXDEV") {
+        try {
+          await fs.promises.copyFile(currentFilePath, restoreSourcePath, fs.constants.COPYFILE_EXCL);
+          const restoredStat = await fs.promises.stat(restoreSourcePath);
+          if (restoredStat.size !== record.sizeBytes) {
+            throw new Error("Cross-device restored file size mismatch");
+          }
+          await fs.promises.unlink(currentFilePath);
+        } catch (copyErr) {
+          return {
+            success: false,
+            status: 500,
+            error: {
+              code: "UNDO_FAILED",
+              message: `Cross-device undo failed: ${copyErr.message}`
+            }
+          };
+        }
+      } else {
         return {
           success: false,
           status: 500,
           error: {
             code: "UNDO_FAILED",
-            message: `Cross-device undo failed: ${copyErr.message}`
+            message: `Unable to restore file: ${renameErr.message}`
           }
         };
       }
-    } else {
-      return {
-        success: false,
-        status: 500,
-        error: {
-          code: "UNDO_FAILED",
-          message: `Unable to restore file: ${renameErr.message}`
-        }
-      };
     }
+
+    // 7. Update status and append to durable journal
+    const undoneAt = new Date().toISOString();
+    record.status = "undone";
+    record.undoneAt = undoneAt;
+    record.undoAvailable = false;
+    historyItem.status = "undone";
+    historyItem.undoneAt = undoneAt;
+    historyItem.undoAvailable = false;
+
+    try {
+      await recoveryJournal.appendJournalEntry({
+        operationId: record.operationId,
+        status: "undone",
+        sourcePath: record.sourceRelative,
+        destinationPath: record.destRelative,
+        destinationDir: record.destDirRelative,
+        fileName: record.fileName,
+        sizeBytes: record.sizeBytes,
+        undoneAt
+      }, options);
+    } catch (journalErr) {
+      console.warn(`[Recovery Journal] Failed to append undo record for ${record.operationId}:`, journalErr.message);
+    }
+
+    return {
+      success: true,
+      status: 200,
+      data: {
+        operationId: record.operationId,
+        status: "undone",
+        sourcePath: record.sourceRelative,
+        destinationPath: record.destRelative,
+        undoneAt
+      }
+    };
+  } finally {
+    activeExecutionLocks.delete(cleanOpId);
+  }
+}
+
+/**
+ * Resolves an operation that has been flagged as 'recovery_required'.
+ * Requires explicit user confirmation; never modifies files automatically.
+ *
+ * @param {object} params
+ * @param {string} params.operationId
+ * @param {string} params.resolution - 'dismiss' or 'retry_unlink_source'
+ * @param {object} [options={}]
+ * @returns {Promise<{ success: boolean, data?: object, error?: object, status?: number }>}
+ */
+async function resolveRecoveryOperation(params = {}, options = {}) {
+  const { operationId, resolution } = params;
+
+  if (typeof operationId !== "string" || !operationId.trim()) {
+    return {
+      success: false,
+      status: 400,
+      error: { code: "INVALID_OPERATION_ID", message: "Operation ID must be a non-empty string." }
+    };
   }
 
-  // 7. Update status
-  const undoneAt = new Date().toISOString();
-  record.status = "undone";
-  record.undoneAt = undoneAt;
-  historyItem.status = "undone";
-  historyItem.undoneAt = undoneAt;
-  historyItem.undoAvailable = false;
+  const cleanOpId = operationId.trim();
+  const record = previewStore.get(cleanOpId);
+  const historyItem = operationHistory.find((h) => h.operationId === cleanOpId);
 
-  return {
-    success: true,
-    status: 200,
-    data: {
+  if (!record || !historyItem) {
+    return {
+      success: false,
+      status: 404,
+      error: { code: "OPERATION_NOT_FOUND", message: "Operation was not found in recovery records." }
+    };
+  }
+
+  if (record.status !== "recovery_required" && historyItem.status !== "recovery_required") {
+    return {
+      success: false,
+      status: 400,
+      error: { code: "NOT_RECOVERY_REQUIRED", message: `Operation status is ${record.status}, not recovery_required.` }
+    };
+  }
+
+  if (resolution === "dismiss") {
+    // Acknowledge the recovery state and mark resolved
+    record.status = "failed";
+    historyItem.status = "failed";
+    historyItem.recoveryResolvedAt = new Date().toISOString();
+
+    await recoveryJournal.appendJournalEntry({
       operationId: record.operationId,
-      status: "undone",
+      status: "failed",
       sourcePath: record.sourceRelative,
       destinationPath: record.destRelative,
-      undoneAt
+      destinationDir: record.destDirRelative,
+      fileName: record.fileName,
+      sizeBytes: record.sizeBytes,
+      recoveryReason: "Manually dismissed by user."
+    }, options);
+
+    return {
+      success: true,
+      status: 200,
+      data: {
+        operationId: record.operationId,
+        status: "failed",
+        resolution: "dismissed"
+      }
+    };
+  }
+
+  return {
+    success: false,
+    status: 400,
+    error: {
+      code: "INVALID_RESOLUTION",
+      message: "Unsupported recovery resolution. Allowed values: 'dismiss'."
     }
   };
 }
 
 /**
- * Returns the operation history of completed actions.
+ * Returns the operation history of completed and recovery actions.
  * Never exposes approval tokens or absolute server paths.
+ *
+ * @param {object} [options={}]
+ * @returns {object} History and recovery metrics
  */
-function getOperationHistory() {
-  return operationHistory.map((item) => ({
+function getOperationHistory(options = {}) {
+  const history = operationHistory.map((item) => ({
     operationId: item.operationId,
     sourcePath: item.sourcePath,
     destinationPath: item.destinationPath,
@@ -788,14 +1199,37 @@ function getOperationHistory() {
     status: item.status,
     executedAt: item.executedAt,
     undoneAt: item.undoneAt,
-    undoAvailable: item.undoAvailable
+    undoAvailable: Boolean(item.undoAvailable),
+    recoveryReason: item.recoveryReason || null
   }));
+
+  const recoveryRequiredCount = history.filter((h) => h.status === "recovery_required").length;
+
+  return {
+    history,
+    recoveryRequiredCount,
+    corruptedLinesCount: lastCorruptedLinesCount
+  };
+}
+
+/**
+ * Resets in-memory state for isolated test execution.
+ */
+function resetServiceState() {
+  previewStore.clear();
+  operationHistory = [];
+  activeExecutionLocks.clear();
+  lastCorruptedLinesCount = 0;
+  lastRecoveryRequiredCount = 0;
 }
 
 module.exports = {
   previewOperation,
   executeOperation,
   undoOperation,
+  resolveRecoveryOperation,
   getOperationHistory,
+  initOrganizationService,
+  resetServiceState,
   PREVIEW_EXPIRY_MS
 };

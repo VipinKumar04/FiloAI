@@ -4,7 +4,7 @@
 
 filoAI is a privacy-first digital decluttering agent designed to help people understand and organize files safely. The application scans user-selected folders, detects identical files, uses local AI to recommend categories and destinations, and executes only explicitly approved operations.
 
-> **Status: Phase 5 — Safe, User-Approved File Organization.** This repository contains the working foundation with secure read-only folder scanning, streaming SHA-256 duplicate detection, private local AI organization recommendations powered by Ollama and Gemma models, and safe, user-approved file organization with preview, conflict protection, cryptographic approval tokens, and safe undo capabilities. No file may be moved, renamed, overwritten, or deleted without explicit human approval.
+> **Status: Phase 6 — Recovery and Security Hardening.** This repository contains the working foundation with secure read-only folder scanning, streaming SHA-256 duplicate detection, private local AI organization recommendations powered by Ollama and Gemma models, safe user-approved file organization with cryptographic single-use approval tokens, and a durable crash-resilient append-only recovery journal. Interrupted operations are detected on startup without automatically modifying files on disk.
 
 ## Goals
 
@@ -13,7 +13,7 @@ filoAI is a privacy-first digital decluttering agent designed to help people und
 - Require explicit user approval before changing any file on disk.
 - Never overwrite existing files under any circumstance.
 - Avoid automatic deletion and destructive bulk operations.
-- Record operations and support safe undo where possible.
+- Record operations in a durable local recovery journal and support safe undo.
 - Make the project approachable for open-source contributors.
 
 ## Project Structure
@@ -22,17 +22,18 @@ filoAI is a privacy-first digital decluttering agent designed to help people und
 filoAI/
 ├── backend/
 │   ├── app.js                      # Express application setup and middleware
-│   ├── server.js                   # Server initialization and port listening
+│   ├── server.js                   # Server initialization and startup journal audit
 │   ├── routes/
 │   │   ├── duplicateRoutes.js      # POST /api/duplicates
 │   │   ├── healthRoutes.js         # GET /api/health
-│   │   ├── organizationRoutes.js   # POST /api/organization/preview, execute, undo, history
+│   │   ├── organizationRoutes.js   # POST /api/organization/preview, execute, undo, recover, history
 │   │   ├── recommendationRoutes.js # GET /api/recommendations/status, POST /api/recommendations
 │   │   └── scanRoutes.js           # GET /api/scan/config, POST /api/scan
 │   └── services/
 │       ├── duplicateService.js     # Streaming SHA-256 hashing and candidate grouping
-│       ├── organizationService.js  # Preview, approval tokens, atomic moves, undo, and history
+│       ├── organizationService.js  # Preview, approval tokens, atomic moves, undo, and concurrency
 │       ├── recommendationService.js # Local Ollama/Gemma integration and schema validation
+│       ├── recoveryJournal.js      # Durable append-only recovery journal and startup crash recovery
 │       └── scanService.js          # Bounded read-only scanning & path validation
 ├── frontend/
 │   ├── index.html                  # Industrial-dark dashboard with organization workstation
@@ -590,6 +591,63 @@ filoAI enforces an uncompromising human-in-the-loop guarantee: **no file may eve
 - **Regular Files Only**: Directories, named pipes, sockets, and symbolic links cannot be organized or targeted.
 - **Race Condition Limitations (TOCTOU)**: While filoAI applies strict pre-checks and immediate re-validation right before moving files, standard userland Node.js applications cannot guarantee absolute transactional atomicity against hostile concurrent operating-system processes (e.g., another process creating a file at the exact millisecond between existence check and file rename). filoAI is designed for user-controlled personal file management, where non-destructive safety checks minimize risks.
 
+## Operation Recovery & Security Hardening (Phase 6)
+
+### Durable Append-Only Recovery Journal
+
+To guarantee crash resilience without requiring an external database, filoAI maintains a local, append-only recovery journal formatted in JSON Lines (`.jsonl`).
+
+- **Journal Location**: Stored by default at `./data/filo-recovery-journal.jsonl` (or configured via `FILO_JOURNAL_PATH`). The `./data/` directory is strictly excluded from Git tracking via `.gitignore`.
+- **Append-Only Safety**: Every state transition (`executing`, `completed`, `undone`, `failed`, `recovery_required`) is written as an immutable JSON line using `fs.promises.appendFile`. If the Node.js process terminates or power is lost mid-write, existing valid lines are never overwritten or corrupted.
+- **Privacy & Security Bounding**:
+  - Approval tokens and session secrets are **strictly excluded** from journal records.
+  - Only normalized relative subpaths inside the approved scan root are stored; absolute server paths are stripped.
+  - Journal lines are bounded to 64 KB per line and strictly validated against the internal schema before recording or processing. Malformed or oversized lines are safely bypassed without breaking history.
+
+### Startup Crash & Interruption Audit
+
+When the server starts (`server.js`), `initOrganizationService()` audits the recovery journal:
+1. **Pre-execution Logging**: Before attempting any rename or copy on disk, the operation logs an `executing` state record to the journal.
+2. **Crash Detection**: On application boot, any operation whose latest recorded status is `executing` was interrupted by an ungraceful shutdown or crash.
+3. **Non-Destructive Diagnostic**: filoAI inspects the filesystem to determine whether the file exists at the source, destination, both, or neither.
+4. **Absolute Safety Guarantee**: **Startup recovery NEVER automatically moves, deletes, restores, or cleans up files on disk.** Automatic disk mutations during boot risk data loss if external files have changed. Instead, the operation is flagged as `recovery_required` and presented to the user on the dashboard.
+
+### User-Reviewed Recovery Workflow
+
+When an operation requires recovery:
+- The dashboard highlights the operation with a prominent amber alert banner and a `RECOVERY REQUIRED` badge.
+- The user can review the exact diagnosis (e.g., `Destination file copied, but source could not be deleted`).
+- The user can explicitly resolve the alert by clicking **Review & Dismiss** (`POST /api/organization/recover` with `{ "operationId": "...", "resolution": "dismiss" }`).
+- Dismissing records a `recovery_resolved` entry in the journal. No automated unapproved bulk deletions are ever performed.
+
+### Hardened Move Execution & Cross-Device Handling
+
+- **Same-Filesystem Moves**: Conducted atomically using `fs.promises.rename`.
+- **Cross-Device Fallback (`EXDEV`)**: When source and destination reside on different mounts or partitions, `rename` fails with `EXDEV`. filoAI falls back to a verified multi-step transfer:
+  1. Copies the file using `fs.promises.copyFile` with exclusive mode (`COPYFILE_EXCL`), guaranteeing the destination is never overwritten.
+  2. Verifies the destination file size against the original source file.
+  3. Unlinks the original source file only after destination integrity is verified.
+  4. If copy fails partway through, the source remains intact and any partial destination file is cleaned up.
+  5. If copy succeeds but source unlinking fails, both copies are preserved and the operation transitions to `recovery_required`.
+
+### Hardened Undo Verification
+
+Before reversing any operation:
+- Verifies the destination file still exists and is a regular file.
+- Verifies destination file size matches the size recorded during the move to detect whether the file was edited or modified by another application (`DESTINATION_FILE_MODIFIED`).
+- Verifies the original source location is completely unoccupied (`SOURCE_RESTORE_CONFLICT`).
+- Never overwrites any file during undo.
+
+### Concurrency Protection
+
+Concurrent execution requests for the same `operationId` are prevented using active execution locks (`activeExecutionLocks` set). Duplicate simultaneous requests return HTTP 409 `OPERATION_ALREADY_IN_PROGRESS`.
+
+### Known Operating System Limitations & TOCTOU
+
+While filoAI enforces strict pre-checks, immediate revalidation, and single-use cryptographic tokens:
+- Portable Node.js APIs cannot eliminate all kernel-level Time-Of-Check to Time-Of-Use (TOCTOU) race conditions if external hostile processes concurrently alter directories during an operation.
+- Operating systems without atomic cross-device renames require two-phase copy-and-unlink, which filoAI hardens with size checks and journaled recovery states.
+
 ## Current Functionality
 
 - Express server with health, scan, duplicate, recommendation, and organization endpoints
@@ -599,9 +657,11 @@ filoAI enforces an uncompromising human-in-the-loop guarantee: **no file may eve
 - Duplicate group cards with hash badges, role differentiation, and reclaimable bytes
 - Local AI recommendations using Ollama and Gemma with schema enforcement and anti-hallucination validation
 - Safe user-approved file organization with preview, conflict detection, cryptographic approval tokens, and execution logging
-- Safe undo and recovery workflow preventing accidental overwrites
+- Durable, append-only recovery journal (`.jsonl`) with crash resilience and startup interruption audit
+- Safe startup recovery audit that **never modifies, moves, or deletes files automatically**
+- Safe undo and recovery workflow preventing accidental overwrites and modifications
 - Real file metadata listing with formatting and sorting
-- Automated test suite (53 unit and integration tests passing)
+- Automated test suite (63 unit and integration tests passing)
 - GitHub Actions CI workflow
 
 ## Roadmap
@@ -614,9 +674,10 @@ filoAI enforces an uncompromising human-in-the-loop guarantee: **no file may eve
 - [x] Structured AI organization recommendations (Phase 4)
 - [x] Safe, user-approved file organization with preview and conflict detection (Phase 5)
 - [x] Operation history and safe undo (Phase 5)
-- [ ] Validated batch organization with review queue (Phase 6)
-- [ ] Duplicate resolution and safe archiving (Phase 7)
-- [ ] Expanded desktop integration and file system watchers (Phase 8)
+- [x] Recovery journal and security hardening (Phase 6)
+- [ ] Validated batch organization with review queue (Phase 7)
+- [ ] Duplicate resolution and safe archiving (Phase 8)
+- [ ] Expanded desktop integration and file system watchers (Phase 9)
 
 ## Contributing
 
