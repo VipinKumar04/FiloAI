@@ -626,6 +626,348 @@ a { color: inherit; text-decoration: none; }
   font-style: italic;
 }
 
+/* -------------------------------------------------------------
+   04 — REVIEW & ORGANIZE (PHASE 5)
+   ------------------------------------------------------------- */
+.organization-panel {
+  border-top: 1px solid var(--line);
+}
+
+.org-controls {
+  padding: 18px 22px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.org-preview-form {
+  margin: 0;
+}
+
+.org-input-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.org-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  min-width: 220px;
+}
+
+.org-field-label {
+  font-size: 0.65rem;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.org-field-button {
+  padding-bottom: 0;
+}
+
+.org-preview-card {
+  padding: 22px;
+  background: var(--surface-raised);
+  border-bottom: 1px solid var(--line);
+}
+
+.org-preview-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 18px;
+  flex-wrap: wrap;
+}
+
+.org-preview-title-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.org-op-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.78rem;
+  color: var(--accent);
+  background: var(--bg);
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  font-weight: 600;
+}
+
+.org-expires-tag {
+  font-size: 0.68rem;
+  color: var(--muted);
+}
+
+.badge-conflict-status {
+  font-size: 0.66rem;
+  letter-spacing: 0.08em;
+  font-weight: 700;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.badge-conflict-status.conflict-clear {
+  color: var(--green);
+  border-color: rgba(155, 200, 168, 0.4);
+  background: rgba(155, 200, 168, 0.08);
+}
+
+.badge-conflict-status.conflict-warning {
+  color: #e5a39b;
+  border-color: rgba(229, 163, 155, 0.4);
+  background: rgba(229, 163, 155, 0.08);
+}
+
+.org-preview-body {
+  margin-bottom: 20px;
+}
+
+.org-path-comparison {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+.org-path-box {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.org-path-label {
+  font-size: 0.62rem;
+  letter-spacing: 0.09em;
+  color: var(--muted);
+  font-weight: 650;
+}
+
+.org-path-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.82rem;
+  color: var(--text);
+  word-break: break-all;
+}
+
+.org-file-meta {
+  font-size: 0.7rem;
+  color: var(--muted);
+}
+
+.org-path-arrow {
+  color: var(--silver);
+  font-size: 1.4rem;
+  user-select: none;
+}
+
+.org-rationale-box {
+  background: rgba(23, 26, 28, 0.6);
+  border: 1px solid var(--line);
+  padding: 12px 16px;
+  margin-bottom: 16px;
+}
+
+.org-rationale-label {
+  display: block;
+  font-size: 0.64rem;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  font-weight: 600;
+  margin-bottom: 4px;
+}
+
+.org-rationale-text {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.org-conflict-banner {
+  background: rgba(229, 163, 155, 0.1);
+  border: 1px solid rgba(229, 163, 155, 0.45);
+  color: #f7cbc4;
+  padding: 12px 16px;
+  font-size: 0.82rem;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.org-preview-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.button-approve {
+  background: var(--accent);
+  color: #111315;
+  font-weight: 700;
+  padding: 12px 22px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 0.18s ease;
+}
+
+.button-approve:hover:not(:disabled) {
+  background: #ffffff;
+}
+
+.button-approve:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  background: var(--surface-raised);
+  color: var(--muted);
+  border: 1px solid var(--line);
+}
+
+.org-security-notice {
+  font-size: 0.7rem;
+  color: var(--muted);
+  line-height: 1.4;
+  flex: 1;
+  min-width: 220px;
+}
+
+.org-exec-result {
+  margin-top: 18px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+}
+
+.org-exec-result.exec-success {
+  border-color: rgba(155, 200, 168, 0.5);
+  background: rgba(155, 200, 168, 0.05);
+}
+
+.org-exec-result.exec-error {
+  border-color: rgba(229, 163, 155, 0.5);
+  background: rgba(229, 163, 155, 0.05);
+}
+
+.org-exec-status-icon {
+  font-size: 1.25rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.exec-success .org-exec-status-icon {
+  color: var(--green);
+}
+
+.exec-error .org-exec-status-icon {
+  color: #e5a39b;
+}
+
+.org-exec-status-content h4 {
+  margin: 0 0 4px;
+  font-size: 0.92rem;
+  letter-spacing: -0.02em;
+}
+
+.org-exec-status-content p {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.org-history-section {
+  padding: 22px;
+}
+
+.history-empty-note {
+  font-size: 0.82rem;
+  color: var(--muted);
+  padding: 14px 0;
+}
+
+.button-link {
+  background: none;
+  border: none;
+  color: var(--silver);
+  font-size: 0.72rem;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 0;
+}
+
+.button-link:hover {
+  color: #fff;
+}
+
+.badge-completed {
+  color: var(--green);
+  font-size: 0.68rem;
+  font-weight: 600;
+}
+
+.badge-undone {
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-style: italic;
+}
+
+.button-small {
+  padding: 6px 12px;
+  font-size: 0.72rem;
+  gap: 6px;
+}
+
+.rec-card-actions {
+  margin-top: 10px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.rec-path-interactive {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  padding: 3px 6px;
+}
+
+.rec-path-organize-btn {
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  color: var(--silver);
+  font-size: 0.62rem;
+  padding: 2px 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.rec-path-organize-btn:hover {
+  background: var(--line);
+  color: #fff;
+  border-color: var(--silver);
+}
+
 /* Utilities */
 .hidden {
   display: none !important;

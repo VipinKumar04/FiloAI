@@ -4,14 +4,15 @@
 
 filoAI is a privacy-first digital decluttering agent designed to help people understand and organize files safely. The application scans user-selected folders, detects identical files, uses local AI to recommend categories and destinations, and executes only explicitly approved operations.
 
-> **Status: Phase 4 — Local AI Organization Recommendations.** This repository contains the working foundation with secure read-only folder scanning, streaming SHA-256 duplicate detection, and private local AI organization recommendations powered by Ollama and Gemma models. Human review and approval are strictly enforced before any file operations in subsequent phases.
+> **Status: Phase 5 — Safe, User-Approved File Organization.** This repository contains the working foundation with secure read-only folder scanning, streaming SHA-256 duplicate detection, private local AI organization recommendations powered by Ollama and Gemma models, and safe, user-approved file organization with preview, conflict protection, cryptographic approval tokens, and safe undo capabilities. No file may be moved, renamed, overwritten, or deleted without explicit human approval.
 
 ## Goals
 
 - Keep file analysis local wherever practical.
 - Make recommendations understandable and reviewable.
-- Require user approval before changing files.
-- Avoid automatic deletion.
+- Require explicit user approval before changing any file on disk.
+- Never overwrite existing files under any circumstance.
+- Avoid automatic deletion and destructive bulk operations.
 - Record operations and support safe undo where possible.
 - Make the project approachable for open-source contributors.
 
@@ -25,21 +26,24 @@ filoAI/
 │   ├── routes/
 │   │   ├── duplicateRoutes.js      # POST /api/duplicates
 │   │   ├── healthRoutes.js         # GET /api/health
+│   │   ├── organizationRoutes.js   # POST /api/organization/preview, execute, undo, history
 │   │   ├── recommendationRoutes.js # GET /api/recommendations/status, POST /api/recommendations
 │   │   └── scanRoutes.js           # GET /api/scan/config, POST /api/scan
 │   └── services/
 │       ├── duplicateService.js     # Streaming SHA-256 hashing and candidate grouping
+│       ├── organizationService.js  # Preview, approval tokens, atomic moves, undo, and history
 │       ├── recommendationService.js # Local Ollama/Gemma integration and schema validation
 │       └── scanService.js          # Bounded read-only scanning & path validation
 ├── frontend/
-│   ├── index.html                  # Industrial-dark dashboard
+│   ├── index.html                  # Industrial-dark dashboard with organization workstation
 │   ├── css/
 │   │   └── style.css               # Design system, layout, and responsive styles
 │   └── js/
-│       └── app.js                  # Connectivity, scan execution, and UI state
+│       └── app.js                  # Connectivity, scanning, recommendations, and approval workflow
 ├── tests/
 │   ├── duplicate.test.js           # Streaming SHA-256 and duplicate detection tests
 │   ├── health.test.js              # Health and 404 tests
+│   ├── organization.test.js        # Preview, approval token, conflict, undo, and security tests
 │   ├── recommendations.test.js     # Ollama integration, privacy, and schema validation tests
 │   └── scan.test.js                # Scan security, containment, and metadata tests
 ├── .github/
@@ -390,16 +394,214 @@ OLLAMA_TIMEOUT_MS=30000
 - `502 Bad Gateway` (`INVALID_MODEL_OUTPUT`): The model returned unparseable or malformed output.
 - `403 Forbidden` (`OUTSIDE_APPROVED_ROOT`): The requested directory path is outside the approved root.
 
+## Safe User-Approved File Organization (Phase 5)
+
+filoAI enforces an uncompromising human-in-the-loop guarantee: **no file may ever be moved, renamed, overwritten, or deleted without explicit human approval.** AI recommendations generated in Phase 4 are strictly advisory.
+
+### The Two-Phase Approval Workflow
+
+```text
+[ AI Advisory / User Selection ]
+               │
+               ▼
+   POST /api/organization/preview
+               │
+   ┌───────────┴───────────┐
+   │ Check Root Containment│
+   │ Verify Regular File   │
+   │ Detect Name Conflicts │
+   │ Issue Approval Token  │
+   └───────────┬───────────┘
+               │ (Strictly Read-Only — 0 disk changes)
+               ▼
+[ Human Review in Dashboard ]
+   - Source & Target Paths
+   - Conflict Warning Badge
+   - Rationale / Recommendation
+               │
+      ┌────────┴────────┐
+      ▼                 ▼
+  [ Cancel ]      [ Approve Move ]
+                        │
+                        ▼
+            POST /api/organization/execute
+                        │
+            ┌───────────┴───────────┐
+            │ Validate Time & Token │
+            │ Revalidate Source Size│
+            │ Re-verify No Conflict │
+            │ Safe Atomic Relocation│
+            │ Record to History Log │
+            └───────────┬───────────┘
+                        ▼
+            [ Operation Recorded with Undo ]
+```
+
+1. **Step 1: Preview (Strictly Read-Only)**
+   - The user selects a file from an AI recommendation or manually enters a source file and destination subdirectory inside the approved root.
+   - The backend validates path containment inside the canonical root (`fs.realpathSync`), confirms the source is an eligible regular file (rejecting directories, device nodes, and symlinks), and inspects the target location for naming collisions.
+   - The server creates a temporary preview record with a cryptographically random `operationId` (`op_...`) and high-entropy `approvalToken` (valid for 15 minutes).
+   - If a file already exists at the proposed destination, `conflict: true` is flagged and execution is locked.
+   - **Zero filesystem modifications occur during preview.**
+
+2. **Step 2: Explicit Human Review**
+   - The dashboard presents the proposed source path, target path, file size, recommendation rationale, and a prominent conflict indicator.
+   - If a conflict is present, the **Approve** button is disabled, making accidental overwrites impossible.
+   - The user must explicitly click **Approve & Move File** or **Cancel preview**. Merely viewing recommendations or clicking "Generate recommendations" never triggers a move.
+
+3. **Step 3: Cryptographically Validated Execution**
+   - The client submits `operationId` and `approvalToken` to `POST /api/organization/execute`.
+   - The server verifies:
+     - The operation exists and is in `previewed` state (rejecting repeated or replayed executions).
+     - The token has not expired (`expiresAt > Date.now()`).
+     - The token matches the server record using constant-time timing-safe comparison (`crypto.timingSafeEqual`).
+     - Source, destination directory, and destination path all remain strictly inside the canonical approved root.
+     - The source file still exists and its size matches the previewed snapshot (rejecting modified or tampered files).
+     - The destination file **does not exist** (strictly preventing overwriting).
+     - The source file is not a symbolic link.
+   - The file is atomically moved to the destination subfolder (`fs.promises.rename`, with fallback to exclusive copy `COPYFILE_EXCL` and unlink for cross-device filesystems).
+   - The result is saved to an in-memory operation history with relative paths.
+
+4. **Step 4: Safe Undo & Recovery**
+   - The user can review the history of completed operations and request an undo for any completed move.
+   - Before undoing:
+     - The backend verifies that the moved file still exists at the destination location.
+     - The backend verifies that the original source path is **unoccupied** (preventing overwriting any new file placed there in the interim).
+     - If both checks pass, the file is moved back to its original location.
+
+### Organization API Contracts
+
+#### 1. Preview Proposed Move
+
+- **Endpoint**: `POST /api/organization/preview`
+- **Request Body**:
+  ```json
+  {
+    "sourcePath": "inbox/quarterly_report.pdf",
+    "destinationDir": "documents/reports",
+    "recommendationId": "rec_1",
+    "rationale": "Group financial reports into the documents folder."
+  }
+  ```
+- **Success Response (HTTP 200)**:
+  ```json
+  {
+    "success": true,
+    "data": {
+      "operationId": "op_9f8b417c82a1d30e",
+      "approvalToken": "7b82f1...c289",
+      "sourcePath": "inbox/quarterly_report.pdf",
+      "destinationPath": "documents/reports/quarterly_report.pdf",
+      "destinationDir": "documents/reports",
+      "fileName": "quarterly_report.pdf",
+      "sizeBytes": 245760,
+      "conflict": false,
+      "conflictReason": null,
+      "canExecute": true,
+      "expiresAt": "2026-10-22T18:30:00.000Z",
+      "recommendationId": "rec_1",
+      "rationale": "Group financial reports into the documents folder."
+    }
+  }
+  ```
+
+#### 2. Execute Approved Move
+
+- **Endpoint**: `POST /api/organization/execute`
+- **Request Body**:
+  ```json
+  {
+    "operationId": "op_9f8b417c82a1d30e",
+    "approvalToken": "7b82f1...c289"
+  }
+  ```
+- **Success Response (HTTP 200)**:
+  ```json
+  {
+    "success": true,
+    "data": {
+      "operationId": "op_9f8b417c82a1d30e",
+      "status": "completed",
+      "sourcePath": "inbox/quarterly_report.pdf",
+      "destinationPath": "documents/reports/quarterly_report.pdf",
+      "destinationDir": "documents/reports",
+      "fileName": "quarterly_report.pdf",
+      "executedAt": "2026-10-22T18:16:45.123Z",
+      "undoAvailable": true
+    }
+  }
+  ```
+
+#### 3. Undo Move Operation
+
+- **Endpoint**: `POST /api/organization/undo`
+- **Request Body**:
+  ```json
+  {
+    "operationId": "op_9f8b417c82a1d30e"
+  }
+  ```
+- **Success Response (HTTP 200)**:
+  ```json
+  {
+    "success": true,
+    "data": {
+      "operationId": "op_9f8b417c82a1d30e",
+      "status": "undone",
+      "sourcePath": "inbox/quarterly_report.pdf",
+      "destinationPath": "documents/reports/quarterly_report.pdf",
+      "undoneAt": "2026-10-22T18:17:10.500Z"
+    }
+  }
+  ```
+
+#### 4. Operation History
+
+- **Endpoint**: `GET /api/organization/history`
+- **Success Response (HTTP 200)**:
+  ```json
+  {
+    "success": true,
+    "data": {
+      "history": [
+        {
+          "operationId": "op_9f8b417c82a1d30e",
+          "sourcePath": "inbox/quarterly_report.pdf",
+          "destinationPath": "documents/reports/quarterly_report.pdf",
+          "destinationDir": "documents/reports",
+          "fileName": "quarterly_report.pdf",
+          "sizeBytes": 245760,
+          "recommendationId": "rec_1",
+          "rationale": "Group financial reports into the documents folder.",
+          "status": "completed",
+          "executedAt": "2026-10-22T18:16:45.123Z",
+          "undoneAt": null,
+          "undoAvailable": true
+        }
+      ]
+    }
+  }
+  ```
+
+### Filesystem Safety Guarantees & Operating System Limitations
+
+- **Strict Overwrite Prohibition**: filoAI never overwrites existing destination files during execute or restore. If any file exists at the target path, the operation is blocked with HTTP 409 `DESTINATION_CONFLICT` or `SOURCE_RESTORE_CONFLICT`.
+- **Approved Root Containment**: Every path is validated with canonical resolution. Subpaths attempting `..` directory traversal, absolute server paths, or escaping symlinks are rejected with HTTP 403 `OUTSIDE_APPROVED_ROOT`.
+- **Regular Files Only**: Directories, named pipes, sockets, and symbolic links cannot be organized or targeted.
+- **Race Condition Limitations (TOCTOU)**: While filoAI applies strict pre-checks and immediate re-validation right before moving files, standard userland Node.js applications cannot guarantee absolute transactional atomicity against hostile concurrent operating-system processes (e.g., another process creating a file at the exact millisecond between existence check and file rename). filoAI is designed for user-controlled personal file management, where non-destructive safety checks minimize risks.
+
 ## Current Functionality
 
-- Express server with health, scan, duplicate, and recommendation endpoints
+- Express server with health, scan, duplicate, recommendation, and organization endpoints
 - Responsive industrial-dark dashboard with real-time status and telemetry
 - Secure read-only folder scanning with path traversal protection
 - Streaming SHA-256 duplicate detection with candidate size pre-grouping
 - Duplicate group cards with hash badges, role differentiation, and reclaimable bytes
 - Local AI recommendations using Ollama and Gemma with schema enforcement and anti-hallucination validation
+- Safe user-approved file organization with preview, conflict detection, cryptographic approval tokens, and execution logging
+- Safe undo and recovery workflow preventing accidental overwrites
 - Real file metadata listing with formatting and sorting
-- Automated test suite (40 unit and integration tests passing)
+- Automated test suite (53 unit and integration tests passing)
 - GitHub Actions CI workflow
 
 ## Roadmap
@@ -410,10 +612,11 @@ OLLAMA_TIMEOUT_MS=30000
 - [x] SHA-256 duplicate detection (Phase 3)
 - [x] Local Ollama/Gemma integration (Phase 4)
 - [x] Structured AI organization recommendations (Phase 4)
-- [ ] Review and approval queue (Phase 5)
-- [ ] Validated file moves and conflict handling (Phase 6)
-- [ ] Operation history and safe undo (Phase 7)
-- [ ] Expanded security tests and desktop integration (Phase 8)
+- [x] Safe, user-approved file organization with preview and conflict detection (Phase 5)
+- [x] Operation history and safe undo (Phase 5)
+- [ ] Validated batch organization with review queue (Phase 6)
+- [ ] Duplicate resolution and safe archiving (Phase 7)
+- [ ] Expanded desktop integration and file system watchers (Phase 8)
 
 ## Contributing
 

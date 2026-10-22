@@ -270,13 +270,150 @@
             </div>
           </div>
         </article>
+
+        <article class="panel organization-panel" id="organization-panel" style="margin-top: 20px;">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">04 — REVIEW & ORGANIZE</p>
+              <h3>Safe user-approved file organization</h3>
+            </div>
+            <span class="badge-readonly" title="File changes require explicit, separate user approval.">HUMAN APPROVAL REQUIRED</span>
+          </div>
+
+          <div class="org-controls">
+            <form id="org-preview-form" class="org-preview-form">
+              <div class="org-input-row">
+                <div class="org-field">
+                  <label for="org-source-input" class="org-field-label">SOURCE FILE (inside approved root)</label>
+                  <input
+                    id="org-source-input"
+                    type="text"
+                    class="input-path"
+                    placeholder="e.g. report.pdf or subfolder/data.csv"
+                    autocomplete="off"
+                    spellcheck="false"
+                  >
+                </div>
+                <div class="org-field">
+                  <label for="org-dest-input" class="org-field-label">DESTINATION SUBFOLDER</label>
+                  <input
+                    id="org-dest-input"
+                    type="text"
+                    class="input-path"
+                    placeholder="e.g. documents/archive or media"
+                    value="organized"
+                    autocomplete="off"
+                    spellcheck="false"
+                  >
+                </div>
+                <div class="org-field-button">
+                  <button id="btn-org-preview" class="button button-primary button-scan" type="submit">
+                    <span id="btn-org-preview-text">Preview move</span>
+                    <span id="org-preview-spinner" class="scan-spinner hidden" aria-hidden="true"></span>
+                  </button>
+                </div>
+              </div>
+              <p class="scan-hint">
+                Previewing checks containment and conflict safely without altering the filesystem. Execution requires separate, explicit user approval.
+              </p>
+            </form>
+          </div>
+
+          <div id="org-alert" class="scan-alert hidden" role="alert"></div>
+
+          <div id="org-empty-state" class="empty-state">
+            <div class="line-icon" aria-hidden="true">⚖</div>
+            <p class="empty-title">No organization action in preview.</p>
+            <p class="muted">Enter a file path and destination subfolder above, or click "Review & organize" on any AI recommendation to safely preview a move.</p>
+            <span class="coming-soon">PREVIEW FIRST · NEVER OVERWRITES</span>
+          </div>
+
+          <div id="org-preview-card" class="org-preview-card hidden">
+            <div class="org-preview-header">
+              <div class="org-preview-title-group">
+                <span class="org-op-id" id="org-preview-op-id">op_00000000</span>
+                <span class="org-expires-tag" id="org-preview-expires">Expires in 15 min</span>
+              </div>
+              <span id="org-conflict-badge" class="badge-conflict-status">CHECKING CONFLICT…</span>
+            </div>
+
+            <div class="org-preview-body">
+              <div class="org-path-comparison">
+                <div class="org-path-box">
+                  <span class="org-path-label">PROPOSED SOURCE</span>
+                  <code class="org-path-code" id="org-preview-source">—</code>
+                  <span class="org-file-meta" id="org-preview-size">—</span>
+                </div>
+                <div class="org-path-arrow" aria-hidden="true">→</div>
+                <div class="org-path-box">
+                  <span class="org-path-label">PROPOSED DESTINATION</span>
+                  <code class="org-path-code" id="org-preview-dest">—</code>
+                  <span class="org-file-meta" id="org-preview-dest-folder">—</span>
+                </div>
+              </div>
+
+              <div class="org-rationale-box">
+                <span class="org-rationale-label">WHY RECOMMENDED:</span>
+                <p id="org-preview-rationale" class="org-rationale-text">User-initiated file organization.</p>
+              </div>
+
+              <div id="org-conflict-banner" class="org-conflict-banner hidden">
+                <span class="conflict-icon">⚠</span>
+                <span id="org-conflict-message">A file with this name already exists in destination. Overwrite is strictly prevented.</span>
+              </div>
+            </div>
+
+            <div class="org-preview-actions">
+              <button id="btn-org-approve" class="button button-approve" type="button">
+                <span id="btn-org-approve-text">Approve & Move File</span>
+                <span id="org-approve-spinner" class="scan-spinner hidden" aria-hidden="true"></span>
+              </button>
+              <button id="btn-org-cancel" class="button button-secondary" type="button">
+                Cancel preview
+              </button>
+              <span class="org-security-notice">Explicit user approval token generated. All parameters revalidated at execution.</span>
+            </div>
+
+            <div id="org-exec-result" class="org-exec-result hidden">
+              <div class="org-exec-status-icon" id="org-exec-status-icon">✓</div>
+              <div class="org-exec-status-content">
+                <h4 id="org-exec-title">Operation completed</h4>
+                <p id="org-exec-message">File successfully organized.</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="org-history-section">
+            <div class="results-header">
+              <span class="results-count">Operation history</span>
+              <button id="btn-refresh-history" class="button-link" type="button">Refresh history</button>
+            </div>
+            <div id="org-history-empty" class="history-empty-note">No file organization actions have been performed yet.</div>
+            <div id="org-history-table-container" class="table-container hidden">
+              <table class="file-table" aria-label="Operation history">
+                <thead>
+                  <tr>
+                    <th scope="col" style="width: 140px;">Operation ID</th>
+                    <th scope="col">Source → Destination</th>
+                    <th scope="col" style="width: 110px;">Status</th>
+                    <th scope="col" style="width: 180px;">Executed</th>
+                    <th scope="col" style="width: 110px; text-align: right;">Action</th>
+                  </tr>
+                </thead>
+                <tbody id="org-history-body">
+                  <!-- Populated dynamically -->
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </article>
       </section>
 
       <section class="safety-strip">
         <span class="safety-symbol" aria-hidden="true">◇</span>
         <div>
           <h2>Human approval. Always.</h2>
-          <p>filoAI is being designed to recommend, not take control. File changes will require your approval, and operations will be validated before execution.</p>
+          <p>filoAI is designed to recommend, not take control. File changes require your explicit preview and cryptographic approval token. Overwrites are strictly prohibited.</p>
         </div>
         <span class="safety-tag">SAFETY BY DESIGN</span>
       </section>

@@ -4,6 +4,7 @@ const healthRoutes = require("./routes/healthRoutes");
 const scanRoutes = require("./routes/scanRoutes");
 const duplicateRoutes = require("./routes/duplicateRoutes");
 const recommendationRoutes = require("./routes/recommendationRoutes");
+const organizationRoutes = require("./routes/organizationRoutes");
 
 const app = express();
 
@@ -14,6 +15,7 @@ app.use("/api/health", healthRoutes);
 app.use("/api/scan", scanRoutes);
 app.use("/api/duplicates", duplicateRoutes);
 app.use("/api/recommendations", recommendationRoutes);
+app.use("/api/organization", organizationRoutes);
 app.use(express.static(path.join(__dirname, "..", "frontend")));
 
 app.use("/api", (req, res) => {
