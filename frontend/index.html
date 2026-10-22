@@ -206,19 +206,68 @@
           </article>
         </div>
 
-        <article class="panel recommendations-panel" style="margin-top: 20px;">
+        <article class="panel recommendations-panel" id="recommendations-panel" style="margin-top: 20px;">
           <div class="panel-heading">
             <div>
               <p class="eyebrow">03 — INTELLIGENCE</p>
-              <h3>Recommendations</h3>
+              <h3>Local AI recommendations</h3>
             </div>
-            <span class="panel-icon" aria-hidden="true">✳</span>
+            <div class="ai-header-status">
+              <span id="ollama-status-badge" class="badge-ollama" title="Checking local Ollama status">
+                <span id="ollama-status-dot" class="status-dot"></span>
+                <span id="ollama-status-text">OLLAMA CHECKING…</span>
+              </span>
+              <span class="badge-readonly" title="Read-only suggestions. File changes require explicit human approval.">READ-ONLY AI</span>
+            </div>
           </div>
-          <div class="empty-state">
+
+          <div class="rec-controls">
+            <div class="rec-model-info">
+              <span class="root-label">CONFIGURED MODEL:</span>
+              <code id="ollama-model-display" class="root-code" title="Configured via OLLAMA_MODEL">gemma2:2b</code>
+              <span id="ollama-notice" class="rec-notice">Local Ollama · 100% private file analysis</span>
+            </div>
+            <div class="rec-actions">
+              <button id="recommendations-button" class="button button-primary button-rec" type="button">
+                <span id="recommendations-button-text">Generate recommendations</span>
+                <span id="recommendations-spinner" class="scan-spinner hidden" aria-hidden="true"></span>
+              </button>
+            </div>
+          </div>
+
+          <div id="rec-alert" class="scan-alert hidden" role="alert"></div>
+
+          <div id="rec-loading" class="scan-state-loading hidden">
+            <div class="state-spinner" aria-hidden="true"></div>
+            <p class="empty-title">Analyzing files with local AI…</p>
+            <p class="muted">Consulting Gemma model locally via Ollama. Only file metadata is analyzed; file contents are never read or transmitted.</p>
+          </div>
+
+          <div id="rec-empty-state" class="empty-state">
             <div class="line-icon" aria-hidden="true">✳</div>
-            <p class="empty-title">Nothing to review. Yet.</p>
-            <p class="muted">Local AI suggestions will appear here for you to review before any changes are made.</p>
-            <span class="coming-soon">LOCAL AI · COMING SOON</span>
+            <p class="empty-title">No AI recommendations generated yet.</p>
+            <p class="muted">Click "Generate recommendations" to analyze scanned folder metadata with your local Gemma model.</p>
+            <span class="coming-soon">LOCAL AI · GEMMA READY</span>
+          </div>
+
+          <div id="rec-zero-state" class="empty-state hidden">
+            <div class="line-icon" aria-hidden="true">✓</div>
+            <p class="empty-title">No organizational changes needed.</p>
+            <p class="muted">The local AI analyzed your files and determined that the current structure is already clean and well organized.</p>
+            <span class="coming-soon">OPTIMAL STRUCTURE</span>
+          </div>
+
+          <div id="rec-results" class="scan-results hidden">
+            <div class="results-header">
+              <span id="rec-results-count" class="results-count">0 recommendations</span>
+              <span id="rec-results-meta" class="results-duration"></span>
+            </div>
+            <div class="rec-disclaimer-banner">
+              <span>⚠ AI suggestions are for review only. Recommendations never modify, move, or delete files automatically.</span>
+            </div>
+            <div id="rec-cards-container" class="rec-cards-container" aria-label="AI recommendations list">
+              <!-- Populated dynamically with recommendation cards -->
+            </div>
           </div>
         </article>
       </section>

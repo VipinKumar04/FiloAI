@@ -46,6 +46,24 @@ const dupResultsDuration = document.querySelector("#dup-results-duration");
 const dupTruncatedBanner = document.querySelector("#dup-truncated-banner");
 const dupGroupsContainer = document.querySelector("#dup-groups-container");
 
+// DOM Elements — AI Recommendations
+const ollamaStatusBadge = document.querySelector("#ollama-status-badge");
+const ollamaStatusDot = document.querySelector("#ollama-status-dot");
+const ollamaStatusText = document.querySelector("#ollama-status-text");
+const ollamaModelDisplay = document.querySelector("#ollama-model-display");
+const ollamaNotice = document.querySelector("#ollama-notice");
+const recommendationsButton = document.querySelector("#recommendations-button");
+const recommendationsButtonText = document.querySelector("#recommendations-button-text");
+const recommendationsSpinner = document.querySelector("#recommendations-spinner");
+const recAlert = document.querySelector("#rec-alert");
+const recLoading = document.querySelector("#rec-loading");
+const recEmptyState = document.querySelector("#rec-empty-state");
+const recZeroState = document.querySelector("#rec-zero-state");
+const recResults = document.querySelector("#rec-results");
+const recResultsCount = document.querySelector("#rec-results-count");
+const recResultsMeta = document.querySelector("#rec-results-meta");
+const recCardsContainer = document.querySelector("#rec-cards-container");
+
 /**
  * Formats bytes into human-readable string.
  */
@@ -400,11 +418,156 @@ async function handleFindDuplicates(event) {
   }
 }
 
+/**
+ * Loads Ollama connection status and configured model.
+ */
+async function loadOllamaStatus() {
+  try {
+    const res = await fetch("/api/recommendations/status", {
+      headers: { Accept: "application/json" }
+    });
+
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+    const body = await res.json();
+    if (!body.success || !body.data) return;
+
+    const { available, model, modelInstalled } = body.data;
+    ollamaModelDisplay.textContent = model || "gemma2:2b";
+
+    if (available && modelInstalled) {
+      ollamaStatusDot.dataset.state = "online";
+      ollamaStatusText.textContent = `OLLAMA ONLINE · ${model}`;
+      ollamaNotice.textContent = "Local Gemma model ready for private file analysis";
+      ollamaStatusBadge.title = `Connected to local Ollama with ${model} installed`;
+    } else if (available && !modelInstalled) {
+      ollamaStatusDot.dataset.state = "missing-model";
+      ollamaStatusText.textContent = `MODEL NEEDED (${model})`;
+      ollamaNotice.textContent = `Run 'ollama pull ${model}' in your terminal`;
+      ollamaStatusBadge.title = `Ollama is running, but model '${model}' is not installed`;
+    } else {
+      ollamaStatusDot.dataset.state = "offline";
+      ollamaStatusText.textContent = "OLLAMA OFFLINE";
+      ollamaNotice.textContent = "Local Ollama server not detected. Start with 'ollama serve'";
+      ollamaStatusBadge.title = "Ollama is not reachable on localhost:11434";
+    }
+  } catch {
+    ollamaStatusDot.dataset.state = "offline";
+    ollamaStatusText.textContent = "OLLAMA OFFLINE";
+    ollamaNotice.textContent = "Local Ollama server not detected";
+  }
+}
+
+/**
+ * Executes AI recommendation generation using local Gemma via Ollama.
+ */
+async function handleGenerateRecommendations(event) {
+  if (event) event.preventDefault();
+
+  const requestedPath = scanPathInput.value.trim() || ".";
+
+  // UI state: Loading
+  recommendationsButton.disabled = true;
+  recommendationsButtonText.textContent = "Consulting local AI…";
+  recommendationsSpinner.classList.remove("hidden");
+  recAlert.classList.add("hidden");
+  recAlert.textContent = "";
+  recEmptyState.classList.add("hidden");
+  recZeroState.classList.add("hidden");
+  recResults.classList.add("hidden");
+  recLoading.classList.remove("hidden");
+
+  try {
+    const response = await fetch("/api/recommendations", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json"
+      },
+      body: JSON.stringify({ path: requestedPath })
+    });
+
+    const body = await response.json();
+
+    if (!response.ok || !body.success) {
+      const err = body.error || {};
+      const code = err.code ? `[${err.code}] ` : "";
+      const message = err.message || `AI recommendation generation failed (HTTP ${response.status}).`;
+      throw new Error(`${code}${message}`);
+    }
+
+    const { recommendations = [], model = "gemma2:2b", summary = {} } = body.data;
+
+    recLoading.classList.add("hidden");
+
+    if (recommendations.length === 0) {
+      recZeroState.classList.remove("hidden");
+      return;
+    }
+
+    // Render recommendation cards
+    recCardsContainer.innerHTML = recommendations.map((rec) => {
+      const typeLabel = rec.type.replace(/_/g, " ");
+      const confClass = rec.confidence === "high"
+        ? "conf-high"
+        : (rec.confidence === "medium" ? "conf-medium" : "conf-low");
+
+      const pathsHtml = Array.isArray(rec.relevantPaths) && rec.relevantPaths.length > 0
+        ? `
+          <div class="rec-files-section">
+            <span class="rec-files-heading">AFFECTED FILES (${rec.relevantPaths.length}):</span>
+            <div class="rec-paths-list">
+              ${rec.relevantPaths.map((p) => `<span class="rec-path-tag" title="${escapeHtml(p)}">${escapeHtml(p)}</span>`).join("")}
+            </div>
+          </div>
+        `
+        : "";
+
+      return `
+        <div class="rec-card">
+          <div class="rec-card-header">
+            <div class="rec-card-tags">
+              <span class="rec-type-badge">${escapeHtml(typeLabel)}</span>
+              <span class="rec-confidence-badge ${confClass}">CONFIDENCE: ${escapeHtml(rec.confidence.toUpperCase())}</span>
+            </div>
+            <span class="rec-review-tag">REVIEW REQUIRED</span>
+          </div>
+          <div class="rec-card-body">
+            <h4 class="rec-card-title">${escapeHtml(rec.title)}</h4>
+            <p class="rec-card-explanation">${escapeHtml(rec.explanation)}</p>
+            ${pathsHtml}
+          </div>
+          <div class="rec-card-footer">
+            <span class="rec-advisory-note">Advisory recommendation generated by local ${escapeHtml(model)}. User approval required. FiloAI does not alter files in this phase.</span>
+          </div>
+        </div>
+      `;
+    }).join("");
+
+    recResultsCount.textContent = `${recommendations.length} ${recommendations.length === 1 ? "recommendation" : "recommendations"} suggested`;
+    recResultsMeta.textContent = typeof summary.ollamaDurationMs === "number"
+      ? `Model inferred in ${summary.ollamaDurationMs}ms`
+      : "";
+
+    recResults.classList.remove("hidden");
+  } catch (error) {
+    recLoading.classList.add("hidden");
+    recAlert.textContent = error.message || "An unexpected error occurred while contacting local AI.";
+    recAlert.classList.remove("hidden");
+  } finally {
+    recommendationsButton.disabled = false;
+    recommendationsButtonText.textContent = "Generate recommendations";
+    recommendationsSpinner.classList.add("hidden");
+  }
+}
+
 // Event Listeners
 checkButton.addEventListener("click", checkBackend);
 scanForm.addEventListener("submit", handleScan);
 duplicatesButton.addEventListener("click", handleFindDuplicates);
+recommendationsButton.addEventListener("click", handleGenerateRecommendations);
 
 // Initialization
 checkBackend();
 loadScanConfig();
+loadOllamaStatus();

@@ -437,6 +437,195 @@ a { color: inherit; text-decoration: none; }
   padding-top: 4px;
 }
 
+/* Local AI Recommendations UI */
+.ai-header-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.badge-ollama {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.6rem;
+  letter-spacing: 0.08em;
+  color: var(--silver);
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  padding: 4px 8px;
+  font-weight: 600;
+}
+.status-dot[data-state="online"] {
+  background: var(--green);
+}
+.status-dot[data-state="offline"] {
+  background: #e5a39b;
+}
+.status-dot[data-state="missing-model"] {
+  background: #f4d068;
+}
+.rec-controls {
+  padding: 16px 22px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+  background: var(--surface);
+}
+.rec-model-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.72rem;
+  flex-wrap: wrap;
+}
+.rec-notice {
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+.button-rec {
+  padding: 10px 18px;
+  white-space: nowrap;
+}
+.rec-disclaimer-banner {
+  padding: 10px 22px;
+  background: rgba(212, 175, 55, 0.08);
+  border-bottom: 1px solid rgba(212, 175, 55, 0.3);
+  color: #f4d068;
+  font-size: 0.76rem;
+}
+.rec-cards-container {
+  overflow-y: auto;
+  max-height: 520px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 18px 22px;
+}
+.rec-card {
+  background: var(--surface-raised);
+  border: 1px solid var(--line);
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transition: border-color 0.18s ease;
+}
+.rec-card:hover {
+  border-color: var(--silver);
+}
+.rec-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.rec-card-tags {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.rec-type-badge {
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--accent);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  padding: 3px 8px;
+}
+.rec-confidence-badge {
+  font-size: 0.6rem;
+  letter-spacing: 0.07em;
+  font-weight: 700;
+  padding: 3px 7px;
+  white-space: nowrap;
+}
+.rec-confidence-badge.conf-high {
+  color: var(--green);
+  border: 1px solid rgba(155, 200, 168, 0.4);
+  background: rgba(155, 200, 168, 0.08);
+}
+.rec-confidence-badge.conf-medium {
+  color: #f4d068;
+  border: 1px solid rgba(244, 208, 104, 0.4);
+  background: rgba(244, 208, 104, 0.08);
+}
+.rec-confidence-badge.conf-low {
+  color: #e5a39b;
+  border: 1px solid rgba(229, 163, 155, 0.4);
+  background: rgba(229, 163, 155, 0.08);
+}
+.rec-review-tag {
+  font-size: 0.58rem;
+  letter-spacing: 0.09em;
+  font-weight: 700;
+  color: var(--silver);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  padding: 3px 7px;
+  white-space: nowrap;
+}
+.rec-card-title {
+  margin: 4px 0 6px;
+  font-size: 0.98rem;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: -0.02em;
+}
+.rec-card-explanation {
+  margin: 0;
+  font-size: 0.84rem;
+  line-height: 1.6;
+  color: var(--muted);
+}
+.rec-files-section {
+  margin-top: 8px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(48, 52, 54, 0.5);
+}
+.rec-files-heading {
+  font-size: 0.64rem;
+  letter-spacing: 0.08em;
+  font-weight: 700;
+  color: var(--muted);
+  margin-bottom: 8px;
+  display: block;
+}
+.rec-paths-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.rec-path-tag {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.72rem;
+  color: var(--accent);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  padding: 3px 8px;
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rec-card-footer {
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(48, 52, 54, 0.35);
+}
+.rec-advisory-note {
+  font-size: 0.68rem;
+  color: var(--muted);
+  font-style: italic;
+}
+
 /* Utilities */
 .hidden {
   display: none !important;

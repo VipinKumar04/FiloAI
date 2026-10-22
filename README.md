@@ -4,7 +4,7 @@
 
 filoAI is a privacy-first digital decluttering agent designed to help people understand and organize files safely. The application scans user-selected folders, detects identical files, uses local AI to recommend categories and destinations, and executes only explicitly approved operations.
 
-> **Status: Phase 3 — SHA-256 Duplicate Detection.** This repository contains the working foundation with secure, read-only folder scanning, bounded traversal, path-traversal protection, streaming SHA-256 duplicate detection, and real-time dashboard telemetry. AI recommendations and file operations will follow in subsequent phases.
+> **Status: Phase 4 — Local AI Organization Recommendations.** This repository contains the working foundation with secure read-only folder scanning, streaming SHA-256 duplicate detection, and private local AI organization recommendations powered by Ollama and Gemma models. Human review and approval are strictly enforced before any file operations in subsequent phases.
 
 ## Goals
 
@@ -25,9 +25,11 @@ filoAI/
 │   ├── routes/
 │   │   ├── duplicateRoutes.js      # POST /api/duplicates
 │   │   ├── healthRoutes.js         # GET /api/health
+│   │   ├── recommendationRoutes.js # GET /api/recommendations/status, POST /api/recommendations
 │   │   └── scanRoutes.js           # GET /api/scan/config, POST /api/scan
 │   └── services/
 │       ├── duplicateService.js     # Streaming SHA-256 hashing and candidate grouping
+│       ├── recommendationService.js # Local Ollama/Gemma integration and schema validation
 │       └── scanService.js          # Bounded read-only scanning & path validation
 ├── frontend/
 │   ├── index.html                  # Industrial-dark dashboard
@@ -38,6 +40,7 @@ filoAI/
 ├── tests/
 │   ├── duplicate.test.js           # Streaming SHA-256 and duplicate detection tests
 │   ├── health.test.js              # Health and 404 tests
+│   ├── recommendations.test.js     # Ollama integration, privacy, and schema validation tests
 │   └── scan.test.js                # Scan security, containment, and metadata tests
 ├── .github/
 │   └── workflows/
@@ -277,15 +280,126 @@ Analyzes the approved folder or subfolder and returns duplicate groups.
 - `403 Forbidden` (`OUTSIDE_APPROVED_ROOT`): Returned for path traversal (`../`) or absolute paths attempting to escape the approved root.
 - `404 Not Found` (`DIRECTORY_NOT_FOUND`): Returned if the scan target or approved root does not exist.
 
+## Local AI Recommendations (Phase 4)
+
+filoAI generates intelligent organization suggestions using a local LLM via [Ollama](https://ollama.com/), defaulting to Google's lightweight `gemma2:2b` model.
+
+### Privacy Guarantees & Safeguards
+
+- **Metadata Only**: Only filenames, relative subpaths, file extensions, byte sizes, and duplicate metrics are sent to the model. File contents are **never** opened, read, or transmitted.
+- **Strictly Local**: Analysis executes entirely on your machine via Ollama HTTP API (`http://127.0.0.1:11434`). filoAI never connects or silently falls back to any remote cloud AI provider.
+- **Untrusted Model Output**: Filenames and model responses are treated as untrusted data. Responses are validated against a strict JSON schema.
+- **Anti-Hallucination Path Validation**: Every file path returned in an AI recommendation is validated against the cataloged files in the approved scan root. Any hallucinated or invalid path is discarded.
+- **Zero Execution or Code Running**: AI recommendations cannot execute code, scripts, or automated filesystem actions.
+- **Human Approval Always**: Recommendations are purely advisory. They do not alter, move, rename, or delete files.
+
+### Ollama Setup & Model Installation
+
+1. Install Ollama:
+   Download and install from [ollama.com](https://ollama.com/).
+
+2. Download a compatible Gemma model:
+   ```bash
+   ollama pull gemma2:2b
+   ```
+
+3. Ensure Ollama is running:
+   ```bash
+   ollama serve
+   ```
+   (On macOS and Windows, the Ollama desktop app runs the service automatically).
+
+### Configuration
+
+Set configuration variables in your environment or local `.env` file:
+
+```env
+# Ollama base URL (defaults to http://127.0.0.1:11434)
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+
+# Model name (defaults to gemma2:2b)
+OLLAMA_MODEL=gemma2:2b
+
+# Request timeout in milliseconds (defaults to 30000)
+OLLAMA_TIMEOUT_MS=30000
+```
+
+### Recommendation API
+
+#### Check Ollama Readiness
+`GET /api/recommendations/status`
+
+**Response (HTTP 200)**:
+```json
+{
+  "success": true,
+  "data": {
+    "available": true,
+    "model": "gemma2:2b",
+    "modelInstalled": true,
+    "installedModels": ["gemma2:2b"],
+    "baseUrl": "http://127.0.0.1:11434"
+  }
+}
+```
+
+#### Generate Recommendations
+`POST /api/recommendations`
+
+**Request Body**:
+```json
+{
+  "path": "."
+}
+```
+
+**Success Response (HTTP 200)**:
+```json
+{
+  "success": true,
+  "data": {
+    "recommendations": [
+      {
+        "id": "rec_1",
+        "type": "type_grouping",
+        "title": "Group Financial Invoices",
+        "explanation": "Collect related PDF invoice files into a dedicated finance folder.",
+        "relevantPaths": [
+          "documents/invoice_2026_01.pdf",
+          "documents/invoice_2026_02.pdf"
+        ],
+        "confidence": "high",
+        "requiresReview": true
+      }
+    ],
+    "model": "gemma2:2b",
+    "summary": {
+      "totalRecommendations": 1,
+      "totalFilesScanned": 8,
+      "ollamaDurationMs": 1420,
+      "totalDurationMs": 1450
+    }
+  }
+}
+```
+
+**Error Responses**:
+- `503 Service Unavailable` (`OLLAMA_UNAVAILABLE`): Ollama is not running on the configured host/port.
+- `404 Not Found` (`MODEL_NOT_FOUND`): The configured model has not been downloaded in Ollama yet.
+- `504 Gateway Timeout` (`OLLAMA_TIMEOUT`): Ollama inference exceeded the configured timeout limit.
+- `502 Bad Gateway` (`INVALID_MODEL_OUTPUT`): The model returned unparseable or malformed output.
+- `403 Forbidden` (`OUTSIDE_APPROVED_ROOT`): The requested directory path is outside the approved root.
+
 ## Current Functionality
 
-- Express server with health, scan, and duplicate endpoints
+- Express server with health, scan, duplicate, and recommendation endpoints
 - Responsive industrial-dark dashboard with real-time status and telemetry
 - Secure read-only folder scanning with path traversal protection
 - Streaming SHA-256 duplicate detection with candidate size pre-grouping
 - Duplicate group cards with hash badges, role differentiation, and reclaimable bytes
+- Local AI recommendations using Ollama and Gemma with schema enforcement and anti-hallucination validation
 - Real file metadata listing with formatting and sorting
-- Automated test suite (30 unit and integration tests passing)
+- Automated test suite (40 unit and integration tests passing)
 - GitHub Actions CI workflow
 
 ## Roadmap
@@ -294,8 +408,8 @@ Analyzes the approved folder or subfolder and returns duplicate groups.
 - [x] Secure selection and scanning of a user-approved folder (Phase 2)
 - [x] File metadata listing and dashboard statistics (Phase 2)
 - [x] SHA-256 duplicate detection (Phase 3)
-- [ ] Local Ollama/Gemma integration (Phase 4)
-- [ ] Structured AI organization recommendations (Phase 4)
+- [x] Local Ollama/Gemma integration (Phase 4)
+- [x] Structured AI organization recommendations (Phase 4)
 - [ ] Review and approval queue (Phase 5)
 - [ ] Validated file moves and conflict handling (Phase 6)
 - [ ] Operation history and safe undo (Phase 7)
