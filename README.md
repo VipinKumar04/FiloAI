@@ -4,7 +4,7 @@
 
 filoAI is a privacy-first digital decluttering agent designed to help people understand and organize files safely. The application scans user-selected folders, detects identical files, uses local AI to recommend categories and destinations, and executes only explicitly approved operations.
 
-> **Status: Phase 2 — Secure Folder Scanning.** This repository contains the working foundation with secure, read-only folder scanning, bounded traversal, path-traversal protection, and real-time dashboard metadata. Duplicate detection, AI recommendations, and file operations will follow in subsequent phases.
+> **Status: Phase 3 — SHA-256 Duplicate Detection.** This repository contains the working foundation with secure, read-only folder scanning, bounded traversal, path-traversal protection, streaming SHA-256 duplicate detection, and real-time dashboard telemetry. AI recommendations and file operations will follow in subsequent phases.
 
 ## Goals
 
@@ -23,9 +23,11 @@ filoAI/
 │   ├── app.js                      # Express application setup and middleware
 │   ├── server.js                   # Server initialization and port listening
 │   ├── routes/
+│   │   ├── duplicateRoutes.js      # POST /api/duplicates
 │   │   ├── healthRoutes.js         # GET /api/health
 │   │   └── scanRoutes.js           # GET /api/scan/config, POST /api/scan
 │   └── services/
+│       ├── duplicateService.js     # Streaming SHA-256 hashing and candidate grouping
 │       └── scanService.js          # Bounded read-only scanning & path validation
 ├── frontend/
 │   ├── index.html                  # Industrial-dark dashboard
@@ -34,6 +36,7 @@ filoAI/
 │   └── js/
 │       └── app.js                  # Connectivity, scan execution, and UI state
 ├── tests/
+│   ├── duplicate.test.js           # Streaming SHA-256 and duplicate detection tests
 │   ├── health.test.js              # Health and 404 tests
 │   └── scan.test.js                # Scan security, containment, and metadata tests
 ├── .github/
@@ -193,13 +196,96 @@ During read-only scanning, filoAI collects:
 - **Symlinks on Windows**: Symlink creation requires Developer Mode or elevated privileges on certain Windows configurations; symlink containment validation is active across all platforms.
 - **Filesystem Race Conditions (TOCTOU)**: While the scanner applies `lstat` pre-checks, pre-traversal containment verification, cycle tracking, and external symlink skipping, standard Node.js userland APIs cannot provide kernel-level directory descriptor locking against hostile concurrent filesystem processes swapping parent directories mid-scan. filoAI is designed as a personal, local-first utility for user-approved directories rather than a multi-tenant hardened sandbox.
 
+## Duplicate Detection (Phase 3)
+
+### How Duplicate Detection Works
+
+filoAI uses a multi-tier, streaming detection pipeline designed for high performance and minimal memory consumption:
+
+1. **Candidate Grouping by Size**: Files of different byte lengths cannot contain identical data. filoAI groups cataloged files by size first. Files with unique sizes are skipped immediately, saving disk I/O and CPU cycles.
+2. **Streaming SHA-256 Hashing**: For files sharing identical sizes (including 0-byte empty files), SHA-256 hashes are computed using Node.js `crypto` and `fs.createReadStream`. Files are never loaded entirely into memory, allowing large files to be processed safely.
+3. **Bounded Concurrency**: File hashing runs through an internal worker pool (`HASH_CONCURRENCY = 4`) to prevent file descriptor exhaustion (`EMFILE`) or system thrashing.
+4. **Candidate Role Distinction**: filoAI identifies identical files and displays the earliest detected copy as `PRIMARY CANDIDATE` and additional copies as `DUPLICATE COPY`. Crucially, filoAI treats this as a neutral reference without claiming that any copy is definitively the "correct" original.
+5. **Reclaimable Space Calculation**: filoAI computes the exact potential space savings: `(redundantCopies) * sizeBytes` for each duplicate group.
+6. **Strictly Read-Only**: filoAI never modifies, moves, renames, or deletes any files during duplicate detection.
+
+### API: POST /api/duplicates
+
+Analyzes the approved folder or subfolder and returns duplicate groups.
+
+**Request Body**:
+```json
+{
+  "path": "."
+}
+```
+
+**Success Response (HTTP 200)**:
+```json
+{
+  "success": true,
+  "data": {
+    "duplicateGroups": [
+      {
+        "hash": "c6f33cf9a4d84316443018599cc8e7e1dfec6b682ceacdb80bcd902e954fa61a",
+        "sizeBytes": 117,
+        "count": 2,
+        "redundantCopies": 1,
+        "reclaimableBytes": 117,
+        "files": [
+          {
+            "name": "project-plan.md",
+            "relativePath": "documents/project-plan.md",
+            "extension": ".md",
+            "sizeBytes": 117,
+            "lastModified": "2026-10-21T19:06:56.288Z",
+            "role": "primary_candidate",
+            "isPrimaryCandidate": true
+          },
+          {
+            "name": "project-plan-backup.md",
+            "relativePath": "documents/project-plan-backup.md",
+            "extension": ".md",
+            "sizeBytes": 117,
+            "lastModified": "2026-10-22T17:42:33.397Z",
+            "role": "duplicate_copy",
+            "isPrimaryCandidate": false
+          }
+        ]
+      }
+    ],
+    "summary": {
+      "totalDuplicateGroups": 1,
+      "totalDuplicateFiles": 2,
+      "totalRedundantCopies": 1,
+      "reclaimableBytes": 117,
+      "totalScannedFiles": 4,
+      "totalScannedDirectories": 2,
+      "totalCandidateFiles": 2,
+      "skippedFilesCount": 0,
+      "skippedFiles": [],
+      "isTruncated": false,
+      "scanDurationMs": 28,
+      "maxFilesLimit": 2000
+    }
+  }
+}
+```
+
+**Security and Error Responses**:
+- `400 Bad Request` (`PATH_TRAVERSAL_DETECTED` / `NOT_A_DIRECTORY` / `INVALID_DIRECTORY`): Returned for null bytes, non-directory targets, or malformed inputs.
+- `403 Forbidden` (`OUTSIDE_APPROVED_ROOT`): Returned for path traversal (`../`) or absolute paths attempting to escape the approved root.
+- `404 Not Found` (`DIRECTORY_NOT_FOUND`): Returned if the scan target or approved root does not exist.
+
 ## Current Functionality
 
-- Express server with health and scan endpoints
+- Express server with health, scan, and duplicate endpoints
 - Responsive industrial-dark dashboard with real-time status and telemetry
 - Secure read-only folder scanning with path traversal protection
+- Streaming SHA-256 duplicate detection with candidate size pre-grouping
+- Duplicate group cards with hash badges, role differentiation, and reclaimable bytes
 - Real file metadata listing with formatting and sorting
-- Automated test suite (16 unit and integration tests passing)
+- Automated test suite (30 unit and integration tests passing)
 - GitHub Actions CI workflow
 
 ## Roadmap
@@ -207,7 +293,7 @@ During read-only scanning, filoAI collects:
 - [x] Initial project foundation and CI workflow (Phase 1)
 - [x] Secure selection and scanning of a user-approved folder (Phase 2)
 - [x] File metadata listing and dashboard statistics (Phase 2)
-- [ ] SHA-256 duplicate detection (Phase 3)
+- [x] SHA-256 duplicate detection (Phase 3)
 - [ ] Local Ollama/Gemma integration (Phase 4)
 - [ ] Structured AI organization recommendations (Phase 4)
 - [ ] Review and approval queue (Phase 5)

@@ -82,28 +82,18 @@ function getScanConfig(customRoot) {
 }
 
 /**
- * Scans an approved directory in read-only mode and collects file metadata.
+ * Validates and resolves the approved root and requested target directory.
+ * Enforces strict containment, avoids path existence oracles, and checks directory status.
  *
  * @param {string} [requestedPath="."] - Relative subpath or path within the approved root
- * @param {object} [options={}] - Options including custom approvedRoot, maxFiles, maxDepth
- * @returns {Promise<{ success: boolean, data?: object, error?: object, status?: number }>}
+ * @param {string} [approvedRootOption=null] - Optional custom approved root override
+ * @returns {Promise<{ success: boolean, canonicalRoot?: string, canonicalTarget?: string, error?: object, status?: number }>}
  */
-async function scanDirectory(requestedPath = ".", options = {}) {
-  const startTime = Date.now();
-  const envMaxFiles = parseBoundedLimit(process.env.FILO_MAX_FILES, DEFAULT_MAX_FILES, 1, ABSOLUTE_MAX_FILES);
-  const maxFiles = options.maxFiles !== undefined
-    ? parseBoundedLimit(options.maxFiles, envMaxFiles, 1, ABSOLUTE_MAX_FILES)
-    : envMaxFiles;
-
-  const envMaxDepth = parseBoundedLimit(process.env.FILO_MAX_DEPTH, DEFAULT_MAX_DEPTH, 1, ABSOLUTE_MAX_DEPTH);
-  const maxDepth = options.maxDepth !== undefined
-    ? parseBoundedLimit(options.maxDepth, envMaxDepth, 1, ABSOLUTE_MAX_DEPTH)
-    : envMaxDepth;
-
+async function resolveAndValidateTarget(requestedPath = ".", approvedRootOption = null) {
   // 1. Determine and canonicalize approved root
   let canonicalRoot;
   try {
-    const rawRoot = options.approvedRoot ? path.resolve(options.approvedRoot) : getApprovedRoot();
+    const rawRoot = approvedRootOption ? path.resolve(approvedRootOption) : getApprovedRoot();
     if (!fs.existsSync(rawRoot)) {
       return {
         success: false,
@@ -229,6 +219,39 @@ async function scanDirectory(requestedPath = ".", options = {}) {
       }
     };
   }
+
+  return {
+    success: true,
+    canonicalRoot,
+    canonicalTarget
+  };
+}
+
+/**
+ * Scans an approved directory in read-only mode and collects file metadata.
+ *
+ * @param {string} [requestedPath="."] - Relative subpath or path within the approved root
+ * @param {object} [options={}] - Options including custom approvedRoot, maxFiles, maxDepth
+ * @returns {Promise<{ success: boolean, data?: object, error?: object, status?: number }>}
+ */
+async function scanDirectory(requestedPath = ".", options = {}) {
+  const startTime = Date.now();
+  const envMaxFiles = parseBoundedLimit(process.env.FILO_MAX_FILES, DEFAULT_MAX_FILES, 1, ABSOLUTE_MAX_FILES);
+  const maxFiles = options.maxFiles !== undefined
+    ? parseBoundedLimit(options.maxFiles, envMaxFiles, 1, ABSOLUTE_MAX_FILES)
+    : envMaxFiles;
+
+  const envMaxDepth = parseBoundedLimit(process.env.FILO_MAX_DEPTH, DEFAULT_MAX_DEPTH, 1, ABSOLUTE_MAX_DEPTH);
+  const maxDepth = options.maxDepth !== undefined
+    ? parseBoundedLimit(options.maxDepth, envMaxDepth, 1, ABSOLUTE_MAX_DEPTH)
+    : envMaxDepth;
+
+  // Validate and resolve canonical root and target
+  const targetValidation = await resolveAndValidateTarget(requestedPath, options.approvedRoot);
+  if (!targetValidation.success) {
+    return targetValidation;
+  }
+  const { canonicalRoot, canonicalTarget } = targetValidation;
 
   // 8. Recursive bounded read-only scan with cycle detection
   const files = [];
@@ -361,5 +384,11 @@ module.exports = {
   getApprovedRoot,
   isPathInsideApprovedRoot,
   getScanConfig,
-  scanDirectory
+  scanDirectory,
+  resolveAndValidateTarget,
+  parseBoundedLimit,
+  DEFAULT_MAX_FILES,
+  ABSOLUTE_MAX_FILES,
+  DEFAULT_MAX_DEPTH,
+  ABSOLUTE_MAX_DEPTH
 };

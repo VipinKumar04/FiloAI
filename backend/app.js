@@ -2,6 +2,7 @@ const express = require("express");
 const path = require("node:path");
 const healthRoutes = require("./routes/healthRoutes");
 const scanRoutes = require("./routes/scanRoutes");
+const duplicateRoutes = require("./routes/duplicateRoutes");
 
 const app = express();
 
@@ -10,6 +11,7 @@ app.use(express.json({ limit: "32kb" }));
 
 app.use("/api/health", healthRoutes);
 app.use("/api/scan", scanRoutes);
+app.use("/api/duplicates", duplicateRoutes);
 app.use(express.static(path.join(__dirname, "..", "frontend")));
 
 app.use("/api", (req, res) => {

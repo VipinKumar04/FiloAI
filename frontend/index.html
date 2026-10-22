@@ -60,6 +60,21 @@
             <p id="stat-size" class="stat-value">—</p>
             <p id="stat-size-note" class="stat-note">Waiting for scan</p>
           </article>
+          <article class="stat-panel">
+            <p class="stat-label">DUPLICATE GROUPS</p>
+            <p id="stat-dup-groups" class="stat-value">—</p>
+            <p id="stat-dup-groups-note" class="stat-note">Waiting for analysis</p>
+          </article>
+          <article class="stat-panel">
+            <p class="stat-label">REDUNDANT COPIES</p>
+            <p id="stat-dup-copies" class="stat-value">—</p>
+            <p id="stat-dup-copies-note" class="stat-note">Waiting for analysis</p>
+          </article>
+          <article class="stat-panel">
+            <p class="stat-label">ESTIMATED RECLAIMABLE</p>
+            <p id="stat-dup-reclaimable" class="stat-value">—</p>
+            <p id="stat-dup-reclaimable-note" class="stat-note">Waiting for analysis</p>
+          </article>
         </div>
 
         <div class="content-grid">
@@ -89,14 +104,18 @@
                     autocomplete="off"
                     spellcheck="false"
                   >
-                  <button id="scan-button" class="button button-primary button-scan" type="submit">
+                  <button id="scan-button" class="button button-secondary button-scan" type="submit">
                     <span id="scan-button-text">Scan directory</span>
                     <span id="scan-spinner" class="scan-spinner hidden" aria-hidden="true"></span>
+                  </button>
+                  <button id="duplicates-button" class="button button-primary button-duplicates" type="button">
+                    <span id="duplicates-button-text">Find duplicates</span>
+                    <span id="duplicates-spinner" class="scan-spinner hidden" aria-hidden="true"></span>
                   </button>
                 </div>
               </form>
               <p class="scan-hint">
-                Scanning is strictly confined to the approved root. Set <code>FILO_SCAN_ROOT</code> in your environment to target another directory.
+                Operations are strictly confined to the approved root in read-only mode. Set <code>FILO_SCAN_ROOT</code> to inspect another folder.
               </p>
             </div>
 
@@ -141,22 +160,67 @@
             </div>
           </article>
 
-          <article class="panel recommendations-panel">
+          <article class="panel duplicates-panel" id="duplicates-panel">
             <div class="panel-heading">
               <div>
-                <p class="eyebrow">02 — INTELLIGENCE</p>
-                <h3>Recommendations</h3>
+                <p class="eyebrow">02 — DUPLICATES</p>
+                <h3>Duplicate detection</h3>
               </div>
-              <span class="panel-icon" aria-hidden="true">✳</span>
+              <span class="badge-readonly" title="Streaming SHA-256 duplicate identification">SHA-256 READ-ONLY</span>
             </div>
-            <div class="empty-state">
-              <div class="line-icon" aria-hidden="true">✳</div>
-              <p class="empty-title">Nothing to review. Yet.</p>
-              <p class="muted">Local AI suggestions will appear here for you to review before any changes are made.</p>
-              <span class="coming-soon">LOCAL AI · COMING SOON</span>
+
+            <div id="dup-alert" class="scan-alert hidden" role="alert"></div>
+
+            <div id="dup-loading" class="scan-state-loading hidden">
+              <div class="state-spinner" aria-hidden="true"></div>
+              <p class="empty-title">Analyzing files for duplicates…</p>
+              <p class="muted">Grouping by size and calculating streaming SHA-256 hashes safely.</p>
+            </div>
+
+            <div id="dup-empty-state" class="empty-state">
+              <div class="line-icon" aria-hidden="true">⧉</div>
+              <p class="empty-title">No duplicates checked yet.</p>
+              <p class="muted">Click "Find duplicates" to detect identical files across the approved root using streaming SHA-256.</p>
+              <span class="coming-soon">STREAMING SHA-256 READY</span>
+            </div>
+
+            <div id="dup-zero-state" class="empty-state hidden">
+              <div class="line-icon" aria-hidden="true">✓</div>
+              <p class="empty-title">No duplicate files found.</p>
+              <p class="muted">All cataloged files in this folder have unique content. Zero redundant copies detected.</p>
+              <span class="coming-soon">CLEAN · ZERO DUPLICATES</span>
+            </div>
+
+            <div id="dup-results" class="scan-results hidden">
+              <div class="results-header">
+                <span id="dup-results-count" class="results-count">0 duplicate groups</span>
+                <span id="dup-results-duration" class="results-duration"></span>
+              </div>
+              <div id="dup-truncated-banner" class="truncated-banner hidden">
+                <span>⚠ File limit reached. Additional duplicates may exist beyond the cataloged limit.</span>
+              </div>
+              <div id="dup-groups-container" class="dup-groups-container" aria-label="Duplicate file groups">
+                <!-- Populated dynamically with duplicate group cards -->
+              </div>
             </div>
           </article>
         </div>
+
+        <article class="panel recommendations-panel" style="margin-top: 20px;">
+          <div class="panel-heading">
+            <div>
+              <p class="eyebrow">03 — INTELLIGENCE</p>
+              <h3>Recommendations</h3>
+            </div>
+            <span class="panel-icon" aria-hidden="true">✳</span>
+          </div>
+          <div class="empty-state">
+            <div class="line-icon" aria-hidden="true">✳</div>
+            <p class="empty-title">Nothing to review. Yet.</p>
+            <p class="muted">Local AI suggestions will appear here for you to review before any changes are made.</p>
+            <span class="coming-soon">LOCAL AI · COMING SOON</span>
+          </div>
+        </article>
       </section>
 
       <section class="safety-strip">
